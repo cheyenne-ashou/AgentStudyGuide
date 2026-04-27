@@ -1,0 +1,17 @@
+System Design for Agentic AI
+
+Building production-grade agentic systems requires careful consideration of architecture, scalability, and reliability.
+
+The core components of an agentic system architecture are: an API gateway that accepts user requests, an agent orchestrator that coordinates tools and LLMs, a tool registry that manages available capabilities, a memory layer for state persistence, and an observability stack for monitoring.
+
+The orchestrator pattern uses a central coordinator to route tasks to specialized agents. This provides clear control flow and easy debugging but can become a bottleneck. The alternative is a swarm architecture where agents self-organize, offering more parallelism but less predictability.
+
+Scaling agentic systems requires stateless agent workers that can be horizontally scaled. State should be externalized to Redis or a database. Embedding caches reduce repeated computation. Response caches prevent redundant LLM calls for identical queries. Rate limiting per tool prevents runaway agents from exhausting API quotas.
+
+The LLM gateway pattern provides a unified interface to multiple language models. Benefits include: easy model swapping, centralized retry logic, usage tracking, and automatic fallback to backup models when the primary fails. All agents call the gateway, never individual model APIs directly.
+
+Observability is non-negotiable in production. Every agent step should emit a structured trace with: step number, tool called, inputs, outputs, latency, and token counts. Tools like Langfuse, OpenTelemetry, and Arize Phoenix provide specialized observability for LLM applications.
+
+Vector databases are the persistence layer for semantic memory. Options include Pinecone (managed, high performance), Weaviate (open source, hybrid search), pgvector (PostgreSQL extension, familiar tooling), Chroma (local development), and FAISS (Facebook AI Similarity Search, highly efficient for offline use).
+
+RAG (Retrieval-Augmented Generation) is the dominant pattern for knowledge-grounded AI. The pipeline is: chunk documents, embed chunks, store in vector DB, embed query, retrieve top-k similar chunks, inject into prompt, generate response. Hybrid search (combining BM25 keyword search with vector search) outperforms either alone in most benchmarks.

@@ -1,0 +1,15 @@
+LLM Fundamentals
+
+Large Language Models (LLMs) are neural networks trained on massive text datasets to predict the next token in a sequence. Understanding their fundamentals is essential for building reliable AI applications.
+
+Tokenization is the process of splitting text into tokens before processing. Different models use different tokenizers (BPE, WordPiece). The context window defines how many tokens a model can process at once — Claude supports up to 200k tokens, enabling very long documents.
+
+Temperature controls output randomness. At temperature 0, the model always picks the highest-probability next token (deterministic). At temperature 1.0, sampling is proportional to the probability distribution (creative but unpredictable). Most applications use 0.7 as a balanced default.
+
+Prompting strategies significantly impact output quality. Zero-shot prompting asks the model directly. Few-shot prompting provides examples. Chain-of-thought (CoT) prompting asks the model to reason step by step before answering, which reduces errors on complex problems. The ReAct pattern combines reasoning with tool use.
+
+Hallucinations occur when LLMs generate plausible-sounding but false information. This happens because models are trained to produce fluent, likely text rather than verified facts. Mitigation strategies include RAG (grounding answers in retrieved documents), structured outputs (constraining what the model can say), and uncertainty prompting (instructing the model to say "I don't know").
+
+Embeddings are dense vector representations of text that capture semantic meaning. Similar concepts have similar embeddings (measured by cosine similarity). Embeddings enable semantic search — finding documents by meaning rather than exact keyword match. Models like text-embedding-ada-002 (OpenAI) and voyage-3 (Anthropic) produce high-quality embeddings for retrieval tasks.
+
+Prompt caching reduces latency and cost by storing processed prompt prefixes in the model's KV cache. When the same system prompt is reused across requests, cached hits are 10x cheaper and 5x faster than cache misses.

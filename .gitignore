@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+
+# Project runtime data
+tmp_*/
+chroma_db/
+chroma_memory/
+05_projects/project2_rag/chroma_db/
+04_resiliency/evaluation/last_eval.json
+tmp_episodes.json
+
+# Node / Next.js
+node_modules/
+.next/
+.env.local
+out/
+
+# IDE
+.vscode/settings.json
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db

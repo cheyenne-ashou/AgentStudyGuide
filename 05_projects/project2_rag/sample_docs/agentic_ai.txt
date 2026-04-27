@@ -1,0 +1,13 @@
+Agentic AI Systems
+
+Agentic AI systems are intelligent applications that can take sequences of actions to accomplish goals. Unlike simple chatbots that respond to single queries, agents maintain state, use tools, and operate autonomously over multiple steps.
+
+The key components of an agentic system are: a planner that decides what actions to take, an executor that carries out those actions using tools, a memory system that retains context, and an observation loop that processes results and determines next steps.
+
+Common agent architectures include ReAct (Reason + Act), which interleaves reasoning and tool use; Plan-and-Execute, which creates a plan before executing; and multi-agent systems where specialized agents collaborate.
+
+Tools are what give agents their power beyond the base LLM. Common tools include web search for current information, code execution for computation, database queries for structured data, and file I/O for document processing. Tool calling works through function calling APIs where the LLM outputs a structured request that the framework executes.
+
+Resiliency is critical in agentic systems. Common failure modes include hallucinations, tool call errors, infinite reasoning loops, and latency spikes. Mitigations include retry logic with exponential backoff, maximum iteration limits, output schema validation, and human escalation paths.
+
+Memory in agents exists at multiple levels: short-term (context window), long-term (vector database), episodic (past run logs), and semantic (key-value facts). Effective memory design determines whether an agent can improve over time and personalize responses.
