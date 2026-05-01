@@ -40,12 +40,16 @@ export const lessons: Lesson[] = [
         title: 'Zero-shot',
         body: 'You ask the model directly with no examples and no special instructions. Simple and fast, but unreliable on multi-step or ambiguous tasks because the model has to infer your intent from scratch. Best for: simple factual questions, straightforward rewrites, tasks the model does well natively.',
         snippet: {
-          label: 'Zero-shot — just ask',
-          code: `response = client.messages.create(
-    model=FAST_MODEL,
-    max_tokens=150,
-    messages=[{"role": "user", "content": task}],
-)
+          label: 'Zero-shot — LCEL chain',
+          code: `from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
+# chain = prompt_template | llm | parser
+chain = ChatPromptTemplate.from_messages([
+    ("human", "{task}"),
+]) | get_fast_llm() | StrOutputParser()
+
+result = chain.invoke({"task": task})
 # No examples, no format hints — model guesses your intent`,
         },
       },
@@ -78,16 +82,22 @@ export const lessons: Lesson[] = [
         title: 'ReAct (Reason + Act)',
         body: 'ReAct interleaves reasoning (Thought) with actions (Action/tool calls) and observations (results). Unlike CoT which is pure reasoning, ReAct allows the model to gather information mid-reasoning by calling tools. This is the foundation of all agentic AI — every agent framework implements a variation of this loop. The model thinks, acts, sees the result, thinks again, acts again, until done.',
         snippet: {
-          label: 'ReAct — thought/action/observation loop',
-          code: `prompt = (
-    f"{task}\\n\\n"
-    "Thought: what do I need to figure out?\\n"
-    "Action: [calculation]\\n"
-    "Observation: [result]\\n"
-    "(repeat)\\n"
-    "Final Answer: ..."
+          label: 'ReAct — LangGraph StateGraph',
+          code: `from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode, create_react_agent
+
+# The graph IS the ReAct loop
+workflow = StateGraph(AgentState)
+workflow.add_node("agent", call_model)     # Thought: call LLM
+workflow.add_node("tools", ToolNode(tools)) # Action: execute tool
+workflow.add_conditional_edges("agent",    # Observation: route
+    lambda s: "tools" if s["messages"][-1].tool_calls else END
 )
-# In real agents, Action becomes an actual tool_use block`,
+workflow.add_edge("tools", "agent")        # repeat
+agent = workflow.compile()
+
+# Or the one-liner shorthand:
+agent = create_react_agent(get_llm(), tools=[calculator, web_search])`,
         },
       },
       {
@@ -104,7 +114,7 @@ export const lessons: Lesson[] = [
     gotchas: [
       "Don't use CoT for simple tasks (\"what's 2+2?\") — it adds tokens without helping and sometimes makes the model second-guess correct answers.",
       "Few-shot examples must match your actual use case. Wrong examples mislead the model more than no examples.",
-      "ReAct prompts in real agents use Claude's native tool_use blocks, not text formatting — the text ReAct format is conceptual.",
+      "ReAct in LangGraph uses @tool functions + ToolNode — not text Thought/Action/Observation formatting. The text format is conceptual; the graph edges are the real loop.",
     ],
     relatedIds: ['w1-2', 'w1-3', 'w2-8'],
   },
@@ -123,15 +133,17 @@ export const lessons: Lesson[] = [
         title: 'How temperature works',
         body: 'At each step, the model assigns a probability to every possible next token. Temperature is a divisor applied before sampling: high temperature flattens the distribution (more random), low temperature sharpens it (more deterministic). At exactly t=0, the model always picks the single highest-probability token — this is called greedy decoding and is perfectly reproducible.',
         snippet: {
-          label: 'Setting temperature in the API',
-          code: `response = client.messages.create(
-    model=FAST_MODEL,
-    max_tokens=80,
-    temperature=0.0,   # deterministic — same output every time
-    # temperature=0.7, # balanced creativity
-    # temperature=1.0, # maximum randomness
-    messages=[{"role": "user", "content": PROMPT}],
-)`,
+          label: 'Setting temperature with ChatAnthropic',
+          code: `from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage
+
+# Instantiate with explicit temperature
+llm = ChatAnthropic(model=FAST_MODEL, temperature=0.0)
+response = llm.invoke([HumanMessage(content=PROMPT)])
+# response.content is the string output
+
+# Or change temperature per-call without rebuilding:
+result = llm.with_config({"temperature": 0.7}).invoke([...])`,
         },
       },
       {
@@ -157,7 +169,7 @@ export const lessons: Lesson[] = [
       '"What\'s top-p sampling?" — An alternative to temperature that truncates the distribution to the top tokens until their cumulative probability reaches p. Similar effect to temperature but approaches it differently. Usually you only need one or the other.',
     ],
     gotchas: [
-      'Claude does not support temperature=0 exactly in some versions — use 0.0 explicitly and test that outputs are actually deterministic.',
+      'Some models clamp temperature=0 to a minimum internally — always verify reproducibility by running the same prompt twice and comparing outputs.',
       'Temperature only affects sampling. If the model\'s training strongly favors one answer, even t=1.0 will mostly produce that answer.',
       "Don't confuse temperature (randomness) with quality. Lower temperature ≠ better answer. It just means more predictable answer.",
     ],
@@ -458,15 +470,19 @@ results = collection.query(
     concepts: [
       {
         title: 'Prompting (baseline)',
-        body: 'Just write a good prompt and call the API. No special data pipeline, no training. The model uses only its training knowledge. Works for: general tasks well-covered by training data, tasks where exact format doesn\'t matter, prototyping. Fails for: private data, knowledge cutoff issues, highly specific formats.',
+        body: 'Just write a good prompt and call the LLM. No special data pipeline, no training. The model uses only its training knowledge. Works for: general tasks well-covered by training data, tasks where exact format doesn\'t matter, prototyping. Fails for: private data, knowledge cutoff issues, highly specific formats.',
         snippet: {
-          label: 'Prompting — just the API call',
-          code: `# No data pipeline needed, no training cost
-response = client.messages.create(
-    model=MODEL,
-    system="You are a helpful assistant.",
-    messages=[{"role": "user", "content": question}]
-)
+          label: 'Prompting — LCEL chain',
+          code: `from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
+# No data pipeline needed, no training cost
+chain = ChatPromptTemplate.from_messages([
+    ("system", "You are a helpful assistant."),
+    ("human", "{question}"),
+]) | get_llm() | StrOutputParser()
+
+answer = chain.invoke({"question": question})
 # Cheap, fast, but limited to training knowledge`,
         },
       },
@@ -576,101 +592,100 @@ def f1(precision, recall):
   {
     id: 'w2-1',
     slug: 'tool-registry',
-    title: 'The Tool Registry Pattern',
+    title: 'The @tool Decorator Pattern',
     file: '02_agentic_core/tool_use/tool_registry.py',
     weekLabel: 'Week 2 — Agentic Core',
     noApi: true,
     intro:
-      'The Tool Registry pattern defines a standard interface for all tools, decoupling agent logic from specific tool implementations. It\'s the backbone of every production agent system and directly maps to tool registries in LangChain, LangGraph, and AutoGen.',
+      'LangGraph tools are plain Python functions decorated with @tool. The decorator reads the docstring and function signature to build the JSON schema automatically — no hand-written schemas needed. ToolNode dispatches calls at runtime. Understanding this pattern is foundational for every LangGraph agent.',
     concepts: [
       {
-        title: 'The Tool ABC',
-        body: 'An Abstract Base Class defines the interface every tool must implement: name (string), description (string), input_schema (JSON schema), and run(**kwargs) → Any. This contract means the agent can call any tool the same way regardless of what it does. Adding a new tool = implement the interface. Removing a tool = unregister it. The agent code never changes.',
+        title: 'The @tool decorator',
+        body: 'Decorate any Python function with @tool. LangChain reads the docstring (becomes the tool description) and type annotations (become the JSON schema). The result is a BaseTool that bind_tools() can attach to any LLM. Zero boilerplate — just write the function.',
         snippet: {
-          label: 'Tool ABC — the interface contract',
-          code: `from abc import ABC, abstractmethod
+          label: '@tool — docstring becomes description, signature becomes schema',
+          code: `from langchain_core.tools import tool
+import math
 
-class Tool(ABC):
-    @property
-    @abstractmethod
-    def name(self) -> str: ...
+@tool
+def calculator(expression: str) -> str:
+    """Evaluate a mathematical expression. Supports +, -, *, /, **, sqrt, log."""
+    try:
+        result = eval(expression, {"__builtins__": {}}, vars(math))
+        return str(result)
+    except Exception as e:
+        return f"Error: {e}"
 
-    @property
-    @abstractmethod
-    def description(self) -> str: ...
-
-    @property
-    @abstractmethod
-    def input_schema(self) -> dict: ...
-
-    @abstractmethod
-    def run(self, **kwargs) -> Any: ...
-
-    def to_claude_schema(self) -> dict:
-        return {"name": self.name, "description": self.description,
-                "input_schema": self.input_schema}`,
+@tool
+def get_datetime() -> str:
+    """Get the current UTC date, time, and day of week."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%A, %B %d %Y — %H:%M:%S UTC")`,
         },
       },
       {
-        title: 'The ToolRegistry',
-        body: 'A dictionary from tool name → tool instance. The registry provides: register (add a tool), get (look up a tool by name), call (execute a tool by name), to_claude_tools (convert all tools to Claude API format). The key method is to_claude_tools() — this is what you pass to the messages.create() tools parameter.',
+        title: 'bind_tools() — attach tools to the LLM',
+        body: 'Call llm.bind_tools(tools) to return a new LLM Runnable that knows about the tool schemas. When invoked, the LLM can produce AIMessages with a .tool_calls list. This is how the agent "knows" which tools exist.',
         snippet: {
-          label: 'ToolRegistry — register and call',
-          code: `registry = ToolRegistry()
-registry.register(CalculatorTool())
-registry.register(DatetimeTool())
+          label: 'bind_tools — attach schemas to the LLM',
+          code: `tools = [calculator, get_datetime, web_search]
 
-# The agent calls tools by name, not by direct import
-result = registry.call("calculator", expression="25 * 47")
+# Returns a new Runnable — does not mutate the original llm
+llm_with_tools = get_llm().bind_tools(tools)
 
-# Pass to Claude API
-tools = registry.to_claude_tools()
-response = client.messages.create(model=MODEL, tools=tools, ...)`,
+# When invoked, response.tool_calls may be non-empty
+response = llm_with_tools.invoke([HumanMessage(content="What is 25 * 47?")])
+print(response.tool_calls)
+# [{"name": "calculator", "args": {"expression": "25 * 47"}, "id": "..."}]`,
         },
       },
       {
-        title: 'Benefits of the registry pattern',
-        body: 'Discoverability: agents can list available tools dynamically. Versioning: register CalculatorV2 alongside CalculatorV1, let agents choose. Access control: restrict which tools are available to which callers. Metrics: central place to track call counts, latency, errors. Mocking: swap real tools for mocks in tests without changing agent code.',
+        title: 'ToolNode — automatic dispatch',
+        body: 'ToolNode is a pre-built LangGraph node. It reads response.tool_calls from the last AIMessage, calls the matching tool function, and returns a list of ToolMessages. Plug it into a StateGraph as the "tools" node — it replaces the entire manual dispatch loop.',
+        snippet: {
+          label: 'ToolNode — one line replaces the dispatch loop',
+          code: `from langgraph.prebuilt import ToolNode
+
+tool_node = ToolNode(tools)  # knows about all @tool functions
+
+# In a StateGraph:
+workflow.add_node("tools", tool_node)
+# On each invocation, ToolNode reads tool_calls from the last AIMessage,
+# executes each tool, and returns ToolMessages with the results`,
+        },
       },
       {
-        title: 'Implementing a concrete tool',
-        body: 'Each tool gets its own class. The input_schema follows JSON Schema format — this is exactly what Claude uses to validate tool calls. Always include a description for each parameter; the LLM reads these to know how to call your tool correctly.',
+        title: 'Manual ABC registry vs @tool (reference)',
+        body: 'The tool_registry.py file still shows the manual ABC pattern (Tool class + ToolRegistry) for reference. It demonstrates what @tool automates: name property → function name, description property → docstring, input_schema → type annotations, run() method → function body, to_claude_tools() → bind_tools(). Understanding the manual version helps you debug schema issues.',
         snippet: {
-          label: 'A concrete tool implementation',
-          code: `class CalculatorTool(Tool):
+          label: 'What @tool replaces',
+          code: `# OLD: hand-written ABC (still in tool_registry.py for reference)
+class CalculatorTool(Tool):
     @property
     def name(self): return "calculator"
-
     @property
     def description(self): return "Evaluate a math expression."
-
     @property
-    def input_schema(self):
-        return {
-            "type": "object",
-            "properties": {
-                "expression": {
-                    "type": "string",
-                    "description": "Math expression, e.g. '(100 * 1.15) / 12'"
-                }
-            },
-            "required": ["expression"]
-        }
+    def input_schema(self): return {"type":"object","properties":{"expression":{"type":"string"}},"required":["expression"]}
+    def run(self, expression): ...
 
-    def run(self, expression: str) -> str:
-        return str(eval(expression, {"__builtins__": {}}, vars(math)))`,
+# NEW: @tool decorator (everything above is auto-generated)
+@tool
+def calculator(expression: str) -> str:
+    """Evaluate a math expression."""
+    ...`,
         },
       },
     ],
     interviewTips: [
-      '"How would you design a tool abstraction layer?" — Define a Tool ABC with name, description, input_schema, and run(). Add a ToolRegistry that holds all tools and exposes to_claude_tools(). Agents never import tool implementations directly.',
-      '"How do you add a new tool without changing agent code?" — Implement the Tool interface, register it in the registry. The agent discovers it automatically via to_claude_tools().',
-      '"How do you mock tools in tests?" — Create MockCalculatorTool(Tool) that returns deterministic values. Register it instead of the real tool in your test setup.',
+      '"How do tools work in LangGraph?" — Decorate Python functions with @tool. Call llm.bind_tools(tools) to attach schemas. ToolNode in the StateGraph dispatches calls automatically.',
+      '"How do you add a new tool without changing agent code?" — Add a new @tool function to the tools list. rebind with bind_tools() and rebuild ToolNode. The StateGraph logic is unchanged.',
+      '"How do you mock tools in tests?" — Swap the @tool function for a mock that returns deterministic values. Pass the mock list to ToolNode.',
     ],
     gotchas: [
-      'Tool names must be unique in the registry. If you register a tool with the same name twice, the second overwrites the first.',
-      'The input_schema must be valid JSON Schema. Missing required fields or wrong types cause Claude to generate invalid tool calls.',
-      "Don't put business logic in the registry — it's just a lookup mechanism. Logic belongs in the Tool implementations.",
+      'The @tool docstring IS the description the LLM reads. A vague docstring → the LLM calls the tool incorrectly. Be specific.',
+      'All parameters need type annotations. Missing types mean the JSON schema is incomplete, which causes the LLM to omit required arguments.',
+      "Don't return complex objects from @tool — return strings. ToolNode passes the return value as a ToolMessage content string.",
     ],
     relatedIds: ['w2-2', 'w2-3', 'w2-8', 'w3-3'],
   },
@@ -707,15 +722,18 @@ def run(self, expression: str) -> str:
       },
       {
         title: 'Returning structured results',
-        body: 'Tools should return strings (Claude\'s tool_result expects a string). For structured data, serialize to JSON. Always return an error string (not raise an exception) if something goes wrong — let the agent decide what to do with the error. This prevents the agent loop from crashing on tool failures.',
+        body: '@tool functions should return strings. ToolNode wraps the return value as a ToolMessage.content string. For structured data, serialize to JSON so the LLM can parse the individual values in its next reasoning step. Always return an error string (not raise an exception) if something goes wrong — let the agent decide what to do with the error.',
         snippet: {
-          label: 'Return JSON from a tool',
-          code: `def run(self, text: str) -> str:
+          label: 'Return JSON string from a @tool function',
+          code: `@tool
+def word_count(text: str) -> str:
+    """Count words, characters, and sentences in a text string."""
+    import re, json
     words = len(text.split())
     chars = len(text)
     sentences = len(re.split(r"[.!?]+", text.strip())) - 1
     return json.dumps({"words": words, "characters": chars, "sentences": sentences})
-# Claude can parse this JSON and work with the individual values`,
+# The LLM reads this JSON string and can reference individual fields`,
         },
       },
       {
@@ -742,12 +760,12 @@ def run(self, expression: str) -> str:
       },
     ],
     interviewTips: [
-      '"How do you handle tool errors in an agent?" — Tools return error strings, not raise exceptions. The agent sees the error as an observation and can retry with different inputs or try a different approach.',
-      '"How do you prevent prompt injection through tool results?" — Validate and sanitize tool outputs before returning them to the agent. Truncate excessively long results. Consider a secondary validation prompt for high-risk tools.',
+      '"How do you handle tool errors in an agent?" — @tool functions return error strings, not raise exceptions. ToolNode passes the error string back as a ToolMessage, and the agent can retry with different inputs or try a different approach.',
+      '"How do you prevent prompt injection through tool results?" — Validate and sanitize tool outputs before returning them. Truncate excessively long results. Consider a secondary validation prompt for high-risk tools.',
     ],
     gotchas: [
-      'Never use bare eval() in a tool. Always restrict __builtins__.',
-      "Tools should be stateless between calls (except when they're explicitly memory tools). Shared state causes bugs in multi-turn conversations.",
+      'Never use bare eval() in a tool. Always restrict __builtins__ to prevent arbitrary code execution.',
+      "@tool functions should be stateless between calls (except explicit memory tools). Shared module-level state causes bugs in multi-turn conversations.",
       "Always truncate tool output to a reasonable length. A web search tool returning 100,000 characters of HTML will overflow the context window.",
     ],
     relatedIds: ['w2-1', 'w2-3', 'w2-8'],
@@ -761,84 +779,82 @@ def run(self, expression: str) -> str:
     weekLabel: 'Week 2 — Agentic Core',
     noApi: false,
     intro:
-      'Function calling (Claude calls it tool_use) is the mechanism that gives agents their power. Understanding the exact API request/response cycle at the raw level is essential — every framework abstracts this, but if you don\'t understand what\'s underneath, you can\'t debug it when it breaks.',
+      'Function calling is the mechanism that gives agents their power. In LangGraph, it flows through three objects: bind_tools() tells the LLM what tools exist, AIMessage.tool_calls captures the model\'s request, and ToolNode executes it. Understanding this cycle is essential — StateGraph builds on top of it.',
     concepts: [
       {
-        title: 'The 5-step tool call cycle',
-        body: '1. Send user query + tool schemas to Claude. 2. Claude returns a response with stop_reason="tool_use" and a tool_use content block. 3. Your code executes the tool. 4. You send the tool result back as a "user" turn. 5. Claude continues and returns stop_reason="end_turn" with the final answer. Steps 2-5 repeat for each tool call in a multi-step task.',
+        title: 'The 4-step LangGraph tool call cycle',
+        body: '1. llm.bind_tools(tools) attaches schemas so the LLM knows what\'s available. 2. llm.invoke([message]) returns an AIMessage — if .tool_calls is non-empty, the model wants to call a tool. 3. ToolNode executes every tool in .tool_calls and returns ToolMessages. 4. Append both the AIMessage and the ToolMessages, then invoke the LLM again. Repeat until tool_calls is empty.',
       },
       {
-        title: 'The tool_use response block',
-        body: 'When Claude wants to call a tool, it returns a content block with type="tool_use", containing: id (unique identifier), name (tool name), and input (JSON arguments). Your code uses the name to look up and call the right tool, and returns the result using the id.',
+        title: 'AIMessage.tool_calls — the routing signal',
+        body: 'When the LLM decides to use a tool, it returns an AIMessage with .tool_calls populated. Each entry is a dict with name (which tool), args (the arguments), and id (unique call ID). The presence of .tool_calls is what the should_continue conditional edge in a StateGraph checks.',
         snippet: {
-          label: 'Parsing a tool_use block',
-          code: `response = client.messages.create(
-    model=MODEL,
-    tools=registry.to_claude_tools(),
-    messages=[{"role": "user", "content": query}]
-)
+          label: 'Inspecting tool_calls on the response',
+          code: `from langchain_core.messages import HumanMessage
 
-if response.stop_reason == "tool_use":
-    for block in response.content:
-        if block.type == "tool_use":
-            print(f"Tool: {block.name}")
-            print(f"Input: {block.input}")
-            result = registry.call(block.name, **block.input)
-            # block.id is used when returning the result`,
+llm_with_tools = get_llm().bind_tools([calculator, get_datetime])
+response = llm_with_tools.invoke([HumanMessage(content="What is 847 ÷ 7?")])
+
+print(response.tool_calls)
+# [{"name": "calculator", "args": {"expression": "847 / 7"}, "id": "call_abc"}]
+
+# No tool_calls means the LLM answered directly
+if not response.tool_calls:
+    print(response.content)  # final answer string`,
         },
       },
       {
-        title: 'Returning tool results',
-        body: 'Tool results go back as a "user" turn with content type "tool_result". You must include the tool_use_id to match result to call. You can return multiple tool results in one user turn if Claude called multiple tools in parallel.',
+        title: 'ToolNode — execute and return ToolMessages',
+        body: 'ToolNode reads all entries in response.tool_calls, calls the matching @tool function for each, and returns a list of ToolMessages (one per call). Append both the AIMessage and the ToolMessages to the conversation, then call the LLM again.',
         snippet: {
-          label: 'Returning the tool result',
-          code: `messages.append({"role": "assistant", "content": response.content})
-messages.append({
-    "role": "user",
-    "content": [{
-        "type": "tool_result",
-        "tool_use_id": block.id,  # must match the tool_use block id
-        "content": result,        # string result from your tool
-    }]
-})
-# Now call Claude again with the updated messages`,
+          label: 'ToolNode executes all tool calls at once',
+          code: `from langgraph.prebuilt import ToolNode
+
+tool_node = ToolNode([calculator, get_datetime, unit_converter])
+
+# tool_node.invoke([response]) returns a list of ToolMessages
+tool_messages = tool_node.invoke([response])
+for tm in tool_messages:
+    print(f"{tm.name}: {tm.content}")
+# calculator: 847 / 7 = 121.0
+
+# Append both AIMessage and ToolMessages, then call LLM again
+messages = [HumanMessage("..."), response] + tool_messages
+final = llm_with_tools.invoke(messages)`,
         },
       },
       {
-        title: 'Multi-turn loop',
-        body: 'For tasks requiring multiple tool calls, keep a messages list and keep calling Claude until stop_reason == "end_turn". Each iteration: Claude returns tool_use → you execute → you append tool_result → repeat. The messages list grows with each turn. This is the ReAct loop at the raw API level.',
+        title: 'Multi-turn loop (explicit)',
+        body: 'String together multiple rounds until tool_calls is empty. This is the same logic that a LangGraph StateGraph encodes as nodes and edges — but written explicitly so you can see exactly what the graph is doing under the hood.',
         snippet: {
-          label: 'The tool call loop',
-          code: `messages = [{"role": "user", "content": query}]
+          label: 'Explicit multi-turn tool loop',
+          code: `messages = [HumanMessage(content=query)]
 
 for _ in range(MAX_STEPS):
-    response = client.messages.create(model=MODEL, tools=TOOLS, messages=messages)
+    response = llm_with_tools.invoke(messages)
+    messages.append(response)
 
-    if response.stop_reason == "end_turn":
-        return response.content[0].text  # done!
+    if not response.tool_calls:
+        return response.content  # done!
 
-    # Execute all tool calls in this response
-    tool_results = []
-    for block in response.content:
-        if block.type == "tool_use":
-            result = execute_tool(block.name, block.input)
-            tool_results.append({"type": "tool_result",
-                                  "tool_use_id": block.id, "content": result})
+    # Execute all tool calls in parallel via ToolNode
+    tool_messages = tool_node.invoke([response])
+    messages.extend(tool_messages)
 
-    messages.append({"role": "assistant", "content": response.content})
-    messages.append({"role": "user", "content": tool_results})`,
+# This is exactly what the StateGraph in react_agent.py encodes:
+# agent node → should_continue edge → tools node → back to agent`,
         },
       },
     ],
     interviewTips: [
-      '"Walk me through how function calling works." — User sends query + tool schemas. Model returns tool_use block with name+input. You execute tool, return tool_result. Model continues. Loop until end_turn.',
-      '"What happens if the model calls a tool that doesn\'t exist?" — You return an error string as the tool_result. The model usually tries a different approach or admits it can\'t complete the task.',
-      '"Can Claude call multiple tools at once?" — Yes. Claude can return multiple tool_use blocks in one response when it knows two tools are independent. Your code runs them (potentially in parallel) and returns all results in one user turn.',
+      '"Walk me through how function calling works in LangGraph." — bind_tools() attaches schemas. LLM returns AIMessage with .tool_calls. ToolNode executes each call and returns ToolMessages. Append both, call LLM again. Loop until tool_calls is empty.',
+      '"What happens if the LLM calls a tool that doesn\'t exist?" — ToolNode raises a KeyError. Return an error ToolMessage. The agent usually tries a different approach.',
+      '"Can the LLM call multiple tools at once?" — Yes. .tool_calls is a list. ToolNode executes all of them in one pass and returns one ToolMessage per call.',
     ],
     gotchas: [
-      'Always append the assistant response (including tool_use blocks) to the messages list before adding tool_results. Skipping this breaks the conversation structure.',
-      'tool_use_id is case-sensitive. Copy it exactly — never re-use or generate your own.',
-      "Some models may return text AND tool_use in the same response. Always iterate over response.content, not just response.content[0].",
+      'Always append the AIMessage to messages BEFORE appending ToolMessages. The conversation structure requires: HumanMessage → AIMessage → ToolMessages → AIMessage → ...',
+      'ToolNode matches tool calls by name to the @tool functions you passed. If the name doesn\'t match, it raises an error. Keep tool names consistent.',
+      'The LLM can return text AND tool_calls in the same AIMessage. Both .content and .tool_calls can be non-empty — read both.',
     ],
     relatedIds: ['w2-1', 'w2-2', 'w2-8'],
   },
@@ -846,64 +862,89 @@ for _ in range(MAX_STEPS):
   {
     id: 'w2-4',
     slug: 'short-term-memory',
-    title: 'Short-Term Memory',
+    title: 'Short-Term Memory & MemorySaver',
     file: '02_agentic_core/memory/short_term.py',
     weekLabel: 'Week 2 — Agentic Core',
     noApi: false,
     intro:
-      'Short-term memory is the messages array you pass to the API each turn. It\'s the only memory the base LLM has. Understanding how to manage it — especially when it grows beyond the context window — is essential for building agents that handle long conversations.',
+      'Short-term memory in LangGraph is the messages list in AgentState. MemorySaver persists it across invocations keyed by thread_id — no manual list management needed. Understanding the underlying rolling window and summarization strategies helps you build custom memory nodes when the defaults aren\'t enough.',
     concepts: [
       {
-        title: 'What short-term memory is',
-        body: 'Every call to the LLM API is stateless. The model has no memory between calls. "Memory" is created by appending the conversation history to every new request. The messages array IS the short-term memory. When the session ends or you stop sending old messages, the "memory" is gone.',
-      },
-      {
-        title: 'Rolling window strategy',
-        body: 'When the messages array grows beyond your desired limit, drop the oldest message pairs from the front while keeping the most recent N pairs. Fast and simple — O(1) operation. Cost: early context is permanently lost. Use when: recency matters more than full history (most conversational agents).',
+        title: 'MemorySaver + thread_id',
+        body: 'LangGraph\'s MemorySaver checkpointer saves the full AgentState (including all messages) after every node. Calling the same graph with the same thread_id automatically continues the conversation from where it left off. This replaces all manual message list management.',
         snippet: {
-          label: 'Rolling window — keep last N pairs',
-          code: `class RollingWindowMemory:
-    def __init__(self, max_pairs=5):
-        self.max_pairs = max_pairs
-        self._messages = []
+          label: 'MemorySaver — persistent conversation by thread_id',
+          code: `from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import HumanMessage
 
-    def add(self, role, content):
-        self._messages.append({"role": role, "content": content})
-        max_msgs = self.max_pairs * 2  # 2 messages per pair (user + assistant)
-        if len(self._messages) > max_msgs:
-            self._messages = self._messages[-max_msgs:]  # keep most recent`,
+memory = MemorySaver()
+agent = create_react_agent(get_llm(), tools=[], checkpointer=memory)
+
+config = {"configurable": {"thread_id": "session-alex"}}
+
+# Turn 1
+agent.invoke({"messages": [HumanMessage("My name is Alex.")]}, config)
+
+# Turn 2 — MemorySaver automatically supplies the prior history
+result = agent.invoke({"messages": [HumanMessage("What's my name?")]}, config)
+# Agent knows it's Alex — no manual messages list needed`,
         },
       },
       {
-        title: 'Summarization strategy',
-        body: 'When the window fills up, ask an LLM to summarize the oldest half of the conversation, then inject the summary as context at the start of the remaining messages. Slower (requires an API call) but preserves meaning from old context. The summary acts as "compressed memory".',
+        title: 'Inspecting state',
+        body: 'Call agent.get_state(config) to see the full message history at any point. This is useful for debugging: you can see exactly what the agent "remembers" for a given thread_id.',
         snippet: {
-          label: 'Summarize old messages',
-          code: `def _compress(self):
-    old_msgs = self._messages[:len(self._messages)//2]
-    self._messages = self._messages[len(self._messages)//2:]
-    history = "\\n".join(f"{m['role'].upper()}: {m['content']}" for m in old_msgs)
-    response = client.messages.create(
-        model=FAST_MODEL, max_tokens=200,
-        messages=[{"role": "user", "content":
-                   f"Summarize this conversation in 2-3 sentences:\\n{history}"}]
-    )
-    self._summary = response.content[0].text`,
+          label: 'Inspect MemorySaver state',
+          code: `state = agent.get_state(config)
+print(f"Total messages: {len(state.values['messages'])}")
+for msg in state.values['messages']:
+    print(f"  {type(msg).__name__}: {msg.content[:80]}")`,
         },
       },
       {
-        title: 'Token counting',
-        body: 'A rough estimate: 1 token ≈ 0.75 words. Monitor your message list size before sending. Claude\'s API returns input_tokens in the usage field — log this. Set an alert if a single turn exceeds your expected range. Unexpected token bloat usually means a tool returned a huge response, a document got injected multiple times, or the system prompt grew.',
+        title: 'Rolling window (conceptual)',
+        body: 'When a conversation exceeds the context window, drop the oldest message pairs from the front. Fast and O(1). Cost: early context is permanently lost. In LangGraph, implement this as a custom node that calls trim_messages() on the state before passing to the agent node.',
+        snippet: {
+          label: 'Rolling window concept — trim before calling agent',
+          code: `from langchain_core.messages import trim_messages
+
+def trim_node(state: AgentState) -> dict:
+    # Keep only the last 3000 tokens worth of messages
+    trimmed = trim_messages(state["messages"], max_tokens=3000,
+                            strategy="last", token_counter=len)
+    return {"messages": trimmed}
+
+workflow.add_node("trim", trim_node)
+workflow.add_edge("trim", "agent")  # trim → agent → tools → agent → ...`,
+        },
+      },
+      {
+        title: 'Summarization (conceptual)',
+        body: 'When the window fills up, ask the LLM to summarize the oldest half of the conversation into a single summary message, then drop the originals. Preserves meaning at lower token cost. Implement as a conditional node that fires when len(messages) > threshold.',
+        snippet: {
+          label: 'Summarization node pattern',
+          code: `from langchain_core.messages import HumanMessage, SystemMessage
+
+def summarize_node(state: AgentState) -> dict:
+    history = "\\n".join(m.content for m in state["messages"][:-2])
+    summary = get_fast_llm().invoke([
+        HumanMessage(f"Summarize this conversation in 2-3 sentences:\\n{history}")
+    ]).content
+    # Replace old messages with a summary + keep last 2
+    return {"messages": [SystemMessage(f"Summary: {summary}")] + state["messages"][-2:]}`,
+        },
       },
     ],
     interviewTips: [
-      '"How do you handle a conversation that exceeds the context window?" — Rolling window drops old messages (fast, loses details). Summarization compresses old turns into a summary (slower, preserves meaning). Hybrid is most common in production.',
-      '"When does short-term memory end?" — When you stop including old messages in the request. There is no persistence — if the process restarts, all conversation history is gone unless you stored it externally (long-term memory).',
+      '"How does memory work in LangGraph?" — MemorySaver persists AgentState keyed by thread_id. Every invocation with the same thread_id resumes from the last checkpoint automatically.',
+      '"How do you handle a conversation that exceeds the context window?" — Add a trim_messages() node before the agent (rolling window), or a summarization node that fires when len(messages) > threshold.',
+      '"What\'s the production equivalent of MemorySaver?" — SqliteSaver (persistent file) or RedisSaver (multi-worker). Same API, different backend.',
     ],
     gotchas: [
-      "Rolling window loses early context silently. If the user said 'my name is Alex' 20 turns ago and you dropped it, the agent will forget their name.",
-      "System prompts count toward the context window. Long system prompts + long conversations = context overflow faster than expected.",
-      "Summarization requires an extra API call, adding latency to that turn. Do it asynchronously or on a background thread if possible.",
+      "Rolling window drops early context silently. If the user said 'my name is Alex' 20 turns ago and you trimmed it, the agent will forget their name.",
+      "System messages count toward the context window too. Long system prompts + long conversations overflow faster than expected.",
+      "Summarization requires an extra LLM call, adding latency to that turn. Fire it in a background step or make it conditional on len(messages) > N.",
     ],
     relatedIds: ['w2-5', 'w2-6', 'w2-7'],
   },
@@ -1111,81 +1152,120 @@ if user_facts:
   {
     id: 'w2-8',
     slug: 'react-agent',
-    title: 'The ReAct Agent',
+    title: 'The ReAct Agent (StateGraph)',
     file: '02_agentic_core/patterns/react_agent.py',
     weekLabel: 'Week 2 — Agentic Core',
     noApi: false,
     intro:
-      'The ReAct agent is the most important file in this repo. Every agent framework you will ever use — LangChain, LangGraph, AutoGen, CrewAI — is a variation on this loop. Understanding it at the raw API level means you can debug any abstraction layer on top of it.',
+      'The ReAct agent is the most important pattern in this repo. In LangGraph, it is a StateGraph with two nodes (agent and tools) connected by a conditional edge. Every agent framework — LangGraph, AutoGen, CrewAI — implements a variation of this graph. Understand the explicit version first, then use create_react_agent() for production.',
     concepts: [
       {
-        title: 'The loop in detail',
-        body: 'Start with messages = [{role: "user", content: query}]. Call Claude with tools defined. If stop_reason == "tool_use": execute each tool_use block, append results, call Claude again. If stop_reason == "end_turn": extract the text response and return it. Repeat until done or max_steps reached.',
+        title: 'The graph IS the loop',
+        body: 'The ReAct loop is expressed as a directed graph: agent node calls the LLM, conditional edge checks if tool_calls is non-empty, tools node executes them via ToolNode, edge back to agent. The graph engine runs this until the conditional edge routes to END. No hand-written while loop needed.',
         snippet: {
-          label: 'The complete ReAct loop',
-          code: `messages = [{"role": "user", "content": query}]
+          label: 'Explicit ReAct StateGraph',
+          code: `from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
+from core.models import AgentState
 
-for step in range(1, MAX_STEPS + 1):
-    response = client.messages.create(
-        model=MODEL,
-        system=cached_system(SYSTEM_PROMPT),
-        tools=TOOLS,
-        messages=messages,
-    )
-    tool_results = []
-    for block in response.content:
-        if block.type == "text":
-            print(f"[{step}] Thought: {block.text[:200]}")
-        elif block.type == "tool_use":
-            result = execute_tool(block.name, block.input)
-            print(f"[{step}] Action: {block.name}({block.input})")
-            print(f"[{step}] Observe: {result}")
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": result,
-            })
-    if response.stop_reason == "end_turn":
-        return next(b.text for b in response.content if b.type == "text")
-    messages.append({"role": "assistant", "content": response.content})
-    messages.append({"role": "user", "content": tool_results})`,
+llm = get_llm().bind_tools(tools)
+
+def call_model(state: AgentState) -> dict:
+    """Agent node: call LLM, return new AIMessage."""
+    return {"messages": [llm.invoke(state["messages"])]}
+
+def should_continue(state: AgentState) -> str:
+    """Router: tool_calls? → tools. Done? → END."""
+    if state["messages"][-1].tool_calls:
+        return "tools"
+    return END
+
+workflow = StateGraph(AgentState)
+workflow.add_node("agent", call_model)       # Reason: call LLM
+workflow.add_node("tools", ToolNode(tools))  # Act: execute tool calls
+workflow.set_entry_point("agent")
+workflow.add_conditional_edges("agent", should_continue)
+workflow.add_edge("tools", "agent")          # Observe: loop back
+agent = workflow.compile()`,
         },
       },
       {
-        title: 'The system prompt role',
-        body: 'The system prompt tells the agent its role, what tools are available (the API handles the schemas, but you describe the context), and when to stop. Keep it clear and not too long. Use prompt caching — the system prompt is sent on every turn, and caching can save 80% of input token costs on long multi-turn tasks.',
+        title: 'How it maps to "Reason + Act"',
+        body: 'Reason = call_model node: the LLM reads the full message history and produces either an answer (no tool_calls) or a decision to call tools (non-empty tool_calls). Act = ToolNode: executes every tool call in the AIMessage and appends ToolMessages. Observe = the edge back to agent: the LLM sees the tool results on the next invocation. This loop continues until the LLM produces no tool_calls.',
+      },
+      {
+        title: 'AgentState with add_messages',
+        body: 'AgentState is a TypedDict with a single field: messages annotated with add_messages. This reducer appends new messages rather than overwriting. Every time call_model returns {"messages": [new_ai_message]}, it is appended to the list — the full conversation history stays intact automatically.',
         snippet: {
-          label: 'System prompt with caching',
-          code: `SYSTEM_PROMPT = """You are a helpful assistant with access to tools.
-Think carefully about what information you need, use tools to gather it,
-and give a clear final answer when you have everything you need.
-Do not use a tool if you already have the answer."""
+          label: 'AgentState — automatic message accumulation',
+          code: `from typing import Annotated, TypedDict
+from langgraph.graph.message import add_messages
 
-# cached_system() wraps the prompt with cache_control for 5-min caching
-response = client.messages.create(
-    system=cached_system(SYSTEM_PROMPT),  # cached!
-    ...
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]
+    # add_messages appends each new message to the list
+    # so {"messages": [new_msg]} appends, not overwrites`,
+        },
+      },
+      {
+        title: 'System prompt injection',
+        body: 'Prepend a SystemMessage in call_model to set the agent\'s persona and instructions. Because the messages list is typed (LangChain message objects), you can filter with isinstance — only inject if no SystemMessage already exists.',
+        snippet: {
+          label: 'Inject SystemMessage in the agent node',
+          code: `from langchain_core.messages import SystemMessage
+
+SYSTEM_PROMPT = """You are a helpful assistant with access to tools.
+Use tools to gather information, then give a clear final answer."""
+
+def call_model(state: AgentState) -> dict:
+    messages = state["messages"]
+    if not any(isinstance(m, SystemMessage) for m in messages):
+        messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+    return {"messages": [llm.invoke(messages)]}`,
+        },
+      },
+      {
+        title: 'Max steps — recursion_limit',
+        body: 'Pass recursion_limit in the config to cap the number of node visits. Prevents infinite loops. 15 is a reasonable default for most tasks. The graph raises a GraphRecursionError when the limit is hit, which you can catch in the calling code.',
+        snippet: {
+          label: 'Cap agent steps with recursion_limit',
+          code: `result = agent.invoke(
+    {"messages": [HumanMessage(content=query)]},
+    config={"recursion_limit": 15},  # max 15 node visits
+)
+# GraphRecursionError is raised if the limit is exceeded`,
+        },
+      },
+      {
+        title: 'create_react_agent() shorthand',
+        body: 'Once you understand the explicit graph, collapse it to one line: create_react_agent(llm, tools) builds the same two-node graph. Pass checkpointer=MemorySaver() for persistence, and prompt= for the system message. Use this in production.',
+        snippet: {
+          label: 'Production shorthand',
+          code: `from langgraph.prebuilt import create_react_agent
+from langgraph.checkpoint.memory import MemorySaver
+
+agent = create_react_agent(
+    get_llm(),
+    tools=[calculator, get_datetime, web_search],
+    checkpointer=MemorySaver(),     # persist per thread_id
+    prompt=SYSTEM_PROMPT,           # injects as SystemMessage
+)
+result = agent.invoke(
+    {"messages": [HumanMessage(content="What is 25 * 47?")]},
+    config={"configurable": {"thread_id": "session-1"}, "recursion_limit": 15},
 )`,
         },
       },
-      {
-        title: 'Max steps and termination',
-        body: 'Always enforce a max_steps limit. Without it, a bug in tool execution or an ambiguous task can cause the agent to loop forever. 10-15 steps is enough for most tasks. The agent signals completion by returning stop_reason == "end_turn" (no tool calls in its response).',
-      },
-      {
-        title: 'Structured logging per step',
-        body: 'Log every step: step number, tools called, inputs, outputs, stop_reason, token counts. This is the primary debugging tool for agents. When something goes wrong, you want to replay the exact sequence of events. Use structlog for structured output that\'s easy to query.',
-      },
     ],
     interviewTips: [
-      '"Explain the ReAct loop." — messages list starts with user query. Claude responds with thoughts (text) and actions (tool_use). You execute tools, append results as tool_result. Claude continues. Loop until end_turn. Always enforce max_steps.',
-      '"How does Claude know when to stop?" — When it returns stop_reason="end_turn" with no tool_use blocks. You can also include stopping instructions in the system prompt: "Give a final answer when you have all the information you need."',
-      '"What do you log in an agent?" — Step number, tool name, tool input, tool output, stop_reason, and token counts per step. These are the minimum required to diagnose any agent failure.',
+      '"Explain the ReAct loop in LangGraph." — StateGraph with agent node (calls LLM) and tools node (ToolNode). Conditional edge: tool_calls non-empty → tools; else → END. Edge from tools back to agent. Runs until END.',
+      '"How does the agent know when to stop?" — should_continue checks if the last AIMessage has non-empty .tool_calls. If empty, it returns END. You can also add stopping instructions to the system prompt.',
+      '"What do you log in a LangGraph agent?" — Every node invocation emits events. Use agent.stream() with stream_mode="values" to observe each state transition. Log tool names, args, results, and message counts per step.',
     ],
     gotchas: [
-      'Never forget to append the assistant response (including tool_use blocks) to the messages list before adding tool results. This is the most common bug in agent implementations.',
-      "Max steps is not a guardrail against infinite loops — it's a hard limit. Build proper stuck-loop detection (same tool called 3x in a row) separately.",
-      "Prompt caching only applies to the system prompt prefix. The growing messages array is not cached. This is expected.",
+      'add_messages appends — it does NOT overwrite. Returning {"messages": [new_msg]} appends new_msg to the list. Returning {"messages": state["messages"] + [new_msg]} would duplicate history.',
+      'recursion_limit counts node visits, not LLM calls. An agent + tools round trip = 2 visits. A limit of 15 allows ~7 tool-calling rounds.',
+      'MemorySaver is in-memory and dies with the process. For production, use SqliteSaver or RedisSaver with the same interface.',
     ],
     relatedIds: ['w2-1', 'w2-3', 'w2-9', 'w3-1'],
   },
@@ -1201,41 +1281,82 @@ response = client.messages.create(
       'Plan-and-execute separates the "what to do" (planning) from "doing it" (execution). The agent first produces a full structured plan, then executes each step. This makes long tasks more predictable, allows human review of the plan, and simplifies debugging.',
     concepts: [
       {
-        title: 'Phase 1: Planning',
-        body: 'Ask Claude to decompose the task into a structured JSON plan. Each step includes: description, tool to use, and expected output. Use a structured output approach (JSON schema) so the plan can be parsed and iterated. The planning phase does not call any tools — it just reasons about the approach.',
+        title: 'Phase 1: Planning with .with_structured_output()',
+        body: 'The planner node uses .with_structured_output(TaskPlan) to ask the LLM for a typed, validated plan object directly. No JSON extraction, no re-prompting loop needed. The result is a Pydantic TaskPlan with a list of TaskStep objects stored in PlanExecuteState["plan"].',
         snippet: {
-          label: 'Ask Claude to produce a JSON plan',
-          code: `schema = {
-    "task": "string",
-    "steps": [{"step_number": "int", "description": "string",
-               "tool": "string", "expected_output": "string"}],
-    "total_steps": "int"
-}
-response = client.messages.create(
-    model=MODEL,
-    system=cached_system(PLANNER_SYSTEM),
-    messages=[{"role": "user", "content":
-               f"Task: {task}\\nCreate a JSON plan:\\n{json.dumps(schema)}"}]
-)
-plan = TaskPlan.model_validate_json(extract_json(response.content[0].text))`,
+          label: 'Planner node with .with_structured_output()',
+          code: `from pydantic import BaseModel
+
+class TaskStep(BaseModel):
+    step_number: int
+    description: str
+    tool: str  # "calculator" | "web_search" | "get_datetime" | "none"
+
+class TaskPlan(BaseModel):
+    task: str
+    steps: list[TaskStep]
+
+def planner_node(state: PlanExecuteState) -> dict:
+    task = state["messages"][-1].content
+    # .with_structured_output() handles schema injection + parsing
+    plan: TaskPlan = get_llm().with_structured_output(TaskPlan).invoke([
+        SystemMessage(content="Decompose the task into sequential steps."),
+        HumanMessage(content=f"Task: {task}"),
+    ])
+    return {"plan": [f"[{s.tool}] {s.description}" for s in plan.steps]}`,
         },
       },
       {
-        title: 'Phase 2: Execution',
-        body: 'Execute each step in order. For tool steps, extract the operation from the step description (another LLM call), execute the tool, and pass the result as context to the next step. The key difference from ReAct: the agent doesn\'t adapt mid-execution unless you build that in.',
+        title: 'Phase 2: Execution via conditional edges',
+        body: 'The executor node pops the first step from state["plan"], executes it (using ToolNode if it needs a tool, or the LLM directly), and appends the result to state["past_steps"]. A conditional edge checks if state["plan"] is empty — if yes, go to the responder; if no, loop back to executor.',
+        snippet: {
+          label: 'Executor node + conditional edge',
+          code: `def executor_node(state: PlanExecuteState) -> dict:
+    current_step = state["plan"][0]
+    remaining = state["plan"][1:]
+    result = run_step(current_step, state["past_steps"])
+    return {
+        "plan": remaining,
+        "past_steps": [(current_step, result)],  # operator.add accumulates
+    }
+
+def route_after_execute(state: PlanExecuteState) -> str:
+    return "respond" if not state["plan"] else "execute"
+
+workflow.add_conditional_edges("executor", route_after_execute, {
+    "execute": "executor",  # more steps remain
+    "respond": "responder", # plan exhausted
+})`,
+        },
+      },
+      {
+        title: 'PlanExecuteState — operator.add on past_steps',
+        body: 'PlanExecuteState uses operator.add as the reducer for past_steps. This means each executor invocation appends its (step, result) pair to the list rather than overwriting it. The full execution history is available to the responder for synthesis.',
+        snippet: {
+          label: 'PlanExecuteState TypedDict',
+          code: `import operator
+from typing import Annotated, TypedDict
+from langgraph.graph.message import add_messages
+
+class PlanExecuteState(TypedDict):
+    messages: Annotated[list, add_messages]  # append-only
+    plan: list[str]                           # shrinks as steps are executed
+    past_steps: Annotated[list, operator.add] # grows as steps complete
+    response: str | None                      # set by responder node`,
+        },
       },
       {
         title: 'When to use plan-and-execute vs ReAct',
-        body: 'Use plan-and-execute for: long-horizon tasks (>5 steps), tasks where you want a human to review the plan before execution, tasks with parallelizable steps. Use ReAct for: short tasks, tasks that need dynamic adaptation (new information changes the approach), tasks where the path is unknown in advance.',
+        body: 'Use plan-and-execute for: long-horizon tasks (>5 steps), tasks where you want human review of the plan before execution, tasks with parallelizable steps. Use ReAct for: short tasks, tasks that need dynamic adaptation (new information changes the approach), tasks where the path is unknown in advance.',
       },
     ],
     interviewTips: [
-      '"What\'s the main benefit of plan-and-execute over ReAct?" — The plan is visible and can be reviewed/corrected before execution. Failures are easier to pinpoint (which step failed?). Steps can be parallelized.',
-      '"What\'s the main drawback?" — Inflexible. If mid-execution conditions change (the search returns no results), the agent can\'t adapt without re-planning.',
+      '"What\'s the main benefit of plan-and-execute over ReAct?" — The plan is visible in PlanExecuteState and can be reviewed before execution. Failures are easier to pinpoint (which step number failed?). Steps can be parallelized.',
+      '"What\'s the main drawback?" — Inflexible. If mid-execution conditions change (the search returns no results), the agent can\'t adapt without re-planning. ReAct adapts naturally; plan-and-execute does not.',
     ],
     gotchas: [
-      "LLM-generated plans can have logical errors or wrong tool choices. Always validate the plan before executing. Consider a 'plan review' step that checks for obvious errors.",
-      "Plan-and-execute with 10 steps means 10+ LLM calls. Cost and latency add up. Profile before choosing this pattern.",
+      "LLM-generated plans can have logical errors. Add a validation step after the planner node that checks the plan before executing. .with_structured_output() validates schema but not business logic.",
+      "operator.add on past_steps accumulates ALL invocations. Each executor call appends — it does not replace. Don't pass past_steps back into the plan unchanged.",
     ],
     relatedIds: ['w2-8', 'w2-10', 'w3-1'],
   },
@@ -1243,33 +1364,82 @@ plan = TaskPlan.model_validate_json(extract_json(response.content[0].text))`,
   {
     id: 'w2-10',
     slug: 'human-in-the-loop',
-    title: 'Human-in-the-Loop',
+    title: 'Human-in-the-Loop (interrupt + Command)',
     file: '02_agentic_core/patterns/human_in_loop.py',
     weekLabel: 'Week 2 — Agentic Core',
     noApi: false,
     intro:
-      'Human oversight is the practical answer to "what do you do when the agent is wrong?" Approval gates pause execution before risky actions; feedback loops let humans correct drafts before they\'re finalized. Both patterns are essential for high-stakes production agents.',
+      'LangGraph has native human-in-the-loop support via interrupt() and Command(resume=...). interrupt() pauses graph execution at any node, surfaces data to the caller, and waits. The graph resumes when Command(resume=<human_response>) is passed — even hours later, with state preserved in the checkpointer.',
     concepts: [
       {
-        title: 'Approval gates',
-        body: 'Before executing a risky action (send email, delete data, deploy, payment), pause and ask a human: "Do you approve this?" If yes, proceed. If no, abort or find an alternative. Approval gates are triggered by action category (always ask for email sends) or by confidence score (ask when the agent\'s confidence is below 0.7).',
+        title: 'interrupt() — pause at any node',
+        body: 'Call interrupt(data) inside any node to pause graph execution. The data dict is surfaced to the caller (e.g., a web API endpoint). The graph state is saved in the checkpointer. Nothing else executes until a resume comes in. This is how you implement approval gates, review steps, and human feedback without blocking threads.',
+        snippet: {
+          label: 'interrupt() pauses execution in-place',
+          code: `from langgraph.types import interrupt
+
+def approval_gate_node(state: AgentState) -> dict:
+    proposed_action = state["messages"][-1].content
+    # Pause here — surface the action to a human reviewer
+    human_response = interrupt({
+        "question": "Approve this action?",
+        "proposed_action": proposed_action,
+    })
+    # Execution continues here only after Command(resume=...) is called
+    if human_response == "approved":
+        return {"messages": [AIMessage(content="Action executed.")]}
+    return {"messages": [AIMessage(content="Action rejected.")]}`,
+        },
       },
       {
-        title: 'When to require approval',
-        body: 'Always require approval for: irreversible actions (delete, send, deploy), actions visible to others, first time an agent takes a new action type, outputs with confidence below a threshold. Progressively relax approval requirements as the agent builds trust (similar to how a new employee gets more autonomy over time).',
+        title: 'Command(resume=...) — resume from pause',
+        body: 'After interrupt() fires, the caller receives the data dict. Once the human has responded, pass Command(resume=<value>) to agent.invoke(). The graph picks up exactly where it paused — the human_response variable inside the node receives the value.',
+        snippet: {
+          label: 'Resuming a paused graph',
+          code: `from langgraph.types import Command
+
+config = {"configurable": {"thread_id": "task-1"}}
+
+# First call: runs until interrupt() fires
+agent.invoke({"messages": [HumanMessage(content=task)]}, config)
+
+# Later — human reviews and approves
+result = agent.invoke(Command(resume="approved"), config)
+# OR rejects:
+result = agent.invoke(Command(resume="rejected: too risky"), config)`,
+        },
       },
       {
-        title: 'Feedback loops',
-        body: 'Generate a draft output, show it to a human, let them give feedback, revise, repeat. Cap revisions at 2-3 to prevent infinite back-and-forth. The revision conversation is injected back into the messages array so the agent has the full context: draft + feedback + revised draft.',
+        title: 'Feedback loop with interrupt()',
+        body: 'For iterative review (draft → feedback → revise → approve), call interrupt() after each draft. The caller shows the draft to the human and calls resume with their feedback. An empty string signals approval. A conditional edge routes back to the writer node if feedback is non-empty.',
+        snippet: {
+          label: 'Feedback loop via interrupt()',
+          code: `def review_node(state: AgentState) -> dict:
+    draft = state["messages"][-1].content
+    feedback = interrupt({"question": "Any changes needed? (empty = approve)", "draft": draft})
+
+    if not feedback:
+        return {"messages": [AIMessage(content="[APPROVED] " + draft)]}
+    # Non-empty feedback → inject as HumanMessage → writer revises
+    return {"messages": [HumanMessage(content=f"Revise: {feedback}")]}
+
+def route_after_review(state):
+    return "writer" if isinstance(state["messages"][-1], HumanMessage) else END`,
+        },
+      },
+      {
+        title: 'When to require human oversight',
+        body: 'Always require approval for: irreversible actions (delete, send, deploy), actions visible to others, first time an agent takes a new action type, outputs below a confidence threshold. Progressively relax requirements as the agent builds trust — similar to how a new employee gets more autonomy over time.',
       },
     ],
     interviewTips: [
-      '"When should an agent ask for human help?" — When confidence is low, when taking an irreversible action, when the task is ambiguous, when tool failures are repeated.',
-      '"How do you gradually reduce human oversight?" — Track approval rate for action types. When a category reaches 95% approval for 30 days, remove the approval gate for that category.',
+      '"How does LangGraph implement human-in-the-loop?" — interrupt() pauses the graph and saves state in the checkpointer. The human responds via Command(resume=...). The graph resumes exactly where it paused.',
+      '"What\'s the advantage over a blocking input() call?" — State is persisted. The human can respond hours later. Multiple agents can be paused simultaneously. Works across HTTP request boundaries.',
     ],
     gotchas: [
-      'Too many approval gates kill UX. Every approval breaks the user\'s flow. Only gate actions that are truly risky or irreversible.',
-      "Async approval (send to a human review queue, continue when approved) is more scalable than blocking synchronous approval.",
+      'interrupt() requires a checkpointer on the compiled graph (MemorySaver or RedisSaver). Without one, there is no state to resume from.',
+      'Too many approval gates kill UX. Every interrupt breaks flow. Only gate actions that are truly risky or irreversible.',
+      'Async approval (pause the graph, notify via webhook, resume when approved) is more scalable than synchronous blocking.',
     ],
     relatedIds: ['w2-8', 'w2-9', 'w3-5'],
   },
@@ -1279,49 +1449,82 @@ plan = TaskPlan.model_validate_json(extract_json(response.content[0].text))`,
   {
     id: 'w3-1',
     slug: 'orchestrator-pattern',
-    title: 'The Orchestrator Pattern',
+    title: 'The Supervisor Pattern',
     file: '03_system_design/orchestrator.py',
     weekLabel: 'Week 3 — System Design',
     noApi: false,
     intro:
-      'The Orchestrator pattern uses a central coordinator to route tasks to specialized sub-agents and aggregate their results. It\'s the most common multi-agent architecture because it\'s easy to reason about and debug.',
+      'The Supervisor pattern uses a central coordinator node to route tasks to specialist sub-agent nodes using Command(goto=...). Each specialist returns Command(goto="supervisor") when done. The graph encodes the routing logic explicitly — no hand-written if/elif chains needed.',
     concepts: [
       {
-        title: 'Orchestrator vs sub-agents',
-        body: 'The orchestrator does not do the work — it decides who does the work. It receives the user request, determines which specialist(s) to invoke, sends them the task, receives their results, and synthesizes a final response. Each sub-agent is focused on one type of task: research, calculation, writing.',
+        title: 'Command(goto=...) — the routing primitive',
+        body: 'Supervisor nodes return Command objects rather than plain dicts. Command(goto="researcher") routes execution to the researcher node next. Command(goto=END) finishes the graph. Specialist nodes return Command(goto="supervisor") to report back. The routing is declared in the return value, not in edge conditions.',
         snippet: {
-          label: 'Orchestrator structure',
-          code: `class Orchestrator:
-    def __init__(self):
-        self._agents: dict[str, tuple[AgentFn, str]] = {}
+          label: 'Supervisor node with Command(goto=...)',
+          code: `from langgraph.types import Command
+from langgraph.graph import END
 
-    def register(self, name, fn, description):
-        self._agents[name] = (fn, description)
+MEMBERS = ["researcher", "calculator", "summarizer"]
 
-    def route(self, user_request) -> str:
-        # Use LLM to decide which agents to invoke
-        selected = self._llm_select_agents(user_request)
-        # Run selected agents and aggregate
-        results = [self.run_agent(name, user_request) for name in selected]
-        return self._synthesize(user_request, results)`,
+def supervisor_node(state: SupervisorState) -> Command:
+    # LLM decides who should act next
+    decision = get_fast_llm().invoke([
+        SystemMessage(f"Route to one of: {', '.join(MEMBERS)}, or FINISH"),
+        *state["messages"],
+    ]).content.strip()
+
+    if decision == "FINISH":
+        return Command(goto=END)
+    return Command(goto=decision, update={"next_agent": decision})`,
         },
       },
       {
-        title: 'LLM-based routing',
-        body: 'The simplest routing strategy: give the LLM a list of available agents with descriptions, and ask it to select the appropriate one(s). More robust alternatives: keyword-based routing (fast, cheap), embedding-based routing (semantic), or a fine-tuned classifier.',
+        title: 'Specialist nodes return to supervisor',
+        body: 'Each specialist does one thing and returns Command(goto="supervisor") so the supervisor can decide what comes next. The update dict in Command lets the specialist append its result to the shared messages state.',
+        snippet: {
+          label: 'Specialist node returns to supervisor',
+          code: `from langchain_core.messages import AIMessage
+
+def researcher_node(state: SupervisorState) -> Command:
+    task = state["messages"][-1].content
+    result = get_fast_llm().invoke([
+        SystemMessage("You are a research agent. Be concise."),
+        HumanMessage(f"Research: {task}"),
+    ]).content
+    return Command(
+        goto="supervisor",
+        update={"messages": [AIMessage(content=result, name="researcher")]},
+    )`,
+        },
       },
       {
-        title: 'Orchestrator vs swarm',
-        body: 'Orchestrator: central controller routes tasks. Easy to reason about. Single point of failure. Less parallel. Swarm: agents self-organize, no central control. More parallel and resilient. Harder to debug and predict. For most production systems, the orchestrator pattern is preferred because predictability > raw performance.',
+        title: 'Graph structure — hub and spoke',
+        body: 'All specialist nodes have an implicit edge back to supervisor (via Command(goto="supervisor")). The supervisor has conditional routes to each specialist and to END. This hub-and-spoke pattern means you add new specialists by writing one new node function — no edge table to update.',
+        snippet: {
+          label: 'Building the supervisor graph',
+          code: `workflow = StateGraph(SupervisorState)
+workflow.add_node("supervisor", supervisor_node)
+workflow.add_node("researcher", researcher_node)
+workflow.add_node("calculator", calculator_node)
+workflow.add_node("summarizer", summarizer_node)
+
+workflow.set_entry_point("supervisor")
+# No add_edge needed — Command(goto=...) handles all routing
+agent = workflow.compile()`,
+        },
+      },
+      {
+        title: 'Supervisor vs swarm',
+        body: 'Supervisor: central controller routes tasks. Easy to reason about and debug. Single coordinator node. Swarm: agents self-organize peer-to-peer, no central control. More parallel and resilient. Harder to debug and predict. For most production systems, the supervisor pattern is preferred because predictability > raw performance.',
       },
     ],
     interviewTips: [
-      '"Design a multi-agent system for research." — Orchestrator routes the task to a Researcher agent (web search), an Analyzer agent (compute), and a Writer agent (synthesis). Orchestrator then synthesizes their outputs.',
-      '"What\'s the bottleneck in the orchestrator pattern?" — The orchestrator itself. If it\'s overloaded or fails, the whole system stops. Mitigate with stateless workers and horizontal scaling.',
+      '"Design a multi-agent system for research." — Supervisor routes to Researcher (web search), Calculator (compute), Summarizer (synthesis). Each returns Command(goto="supervisor"). Supervisor routes to END when done.',
+      '"What\'s the bottleneck in the supervisor pattern?" — The supervisor itself. If it\'s overloaded, the whole system stalls. Mitigate with stateless workers and horizontal scaling (RedisSaver for state).',
     ],
     gotchas: [
-      "Don't put business logic in the orchestrator. It should route and aggregate, not process. Logic belongs in the sub-agents.",
-      "Result aggregation can be expensive. Sending 5 sub-agent results to another LLM for synthesis is another API call. Profile this.",
+      "Don't put business logic in the supervisor. It routes and coordinates — logic belongs in specialist nodes.",
+      "Command(goto=...) routes to exactly one node. If you need to fan out to multiple specialists in parallel, use subgraphs or parallel branches instead.",
     ],
     relatedIds: ['w2-8', 'w2-9', 'w3-2', 'w3-4'],
   },
@@ -1334,31 +1537,32 @@ plan = TaskPlan.model_validate_json(extract_json(response.content[0].text))`,
     weekLabel: 'Week 3 — System Design',
     noApi: false,
     intro:
-      'The LLM Gateway provides a single abstraction layer over all LLM calls. Agents never reference model names directly — they call the gateway. The gateway handles fallback, retry, token tracking, and switching providers.',
+      'The LLM Gateway wraps get_llm() with .with_retry() and .with_fallbacks() to produce a resilient Runnable used by all agents. Agents never reference model names or error types directly — they call the gateway Runnable and get consistent behavior.',
     concepts: [
       {
         title: 'Why a gateway?',
         body: 'Without a gateway, model names and API patterns are scattered across all your agent code. When Anthropic deprecates a model, you update one file. With a gateway, agents are portable between providers. The gateway also centralizes retry logic, rate limiting, and usage metrics.',
       },
       {
-        title: 'Model fallback chain',
-        body: 'Primary model fails (rate limit, outage) → try fallback model 1 → try fallback model 2 → raise error. This is the difference between a 5-second outage and a 30-minute outage. The fallback models should be cost-sorted: primary (most capable), fallback (cheaper/faster).',
+        title: 'Model fallback chain with .with_fallbacks()',
+        body: 'Primary model fails (rate limit, outage) → automatically tries fallback. This is the difference between a 5-second outage and a 30-minute outage. .with_fallbacks() is a composable Runnable method — apply it to any LLM, chain, or retriever. No custom class needed.',
         snippet: {
-          label: 'Fallback chain in the gateway',
-          code: `class LLMGateway:
-    def __init__(self, models=None):
-        self._models = models or [MODEL, FAST_MODEL]  # primary → fallback
+          label: '.with_fallbacks() — composable fallback chain',
+          code: `# Pattern 1: simple fallback
+llm_with_fallback = get_llm().with_fallbacks(
+    [get_fast_llm()],
+    exceptions_to_handle=(Exception,),  # trigger on any error
+)
 
-    def complete(self, messages, max_tokens=512) -> LLMResponse:
-        for i, model in enumerate(self._models):
-            try:
-                response = self._call_model(model, messages, max_tokens)
-                return LLMResponse(text=..., model_used=model, fallback_used=(i > 0))
-            except anthropic.APIStatusError as e:
-                if i < len(self._models) - 1:
-                    print(f"  {model} failed, trying fallback...")
-                    continue
-                raise  # all models failed`,
+# Pattern 2: retry primary first, then fall back
+resilient_llm = (
+    get_llm()
+    .with_retry(stop_after_attempt=3, wait_exponential_jitter=True)
+    .with_fallbacks([get_fast_llm().with_retry(stop_after_attempt=2)])
+)
+
+# Same interface regardless of which model actually responds
+result = resilient_llm.invoke([HumanMessage(content=query)])`,
         },
       },
       {
@@ -1367,12 +1571,12 @@ plan = TaskPlan.model_validate_json(extract_json(response.content[0].text))`,
       },
     ],
     interviewTips: [
-      '"How do you handle model deprecations?" — All agents call the gateway by capability level (e.g., "reasoning", "fast"), not by specific model ID. Update the gateway\'s routing table, no agent code changes.',
-      '"How do you A/B test models?" — Route X% of gateway calls to model A, (100-X)% to model B. Track eval metrics per model. Roll out the winner.',
+      '"How do you handle model deprecations?" — All agents call get_llm() or the resilient_llm gateway Runnable. Swap the model in one place (core/client.py MODEL constant) — no agent code changes.',
+      '"How do you A/B test models?" — Wrap both models in the gateway with a routing function. Route X% of calls to model A, (100-X)% to model B. Track eval metrics per model. Roll out the winner.',
     ],
     gotchas: [
-      'The gateway is a single point of failure. Run multiple gateway instances behind a load balancer.',
-      "Don't add business logic to the gateway. It's infrastructure. Prompt engineering belongs in the agent.",
+      '.with_fallbacks() is composable but not a circuit breaker. It retries on every call. For true circuit-breaker behavior, track consecutive failures externally.',
+      "Don't add business logic to the gateway Runnable. It's infrastructure. Prompt engineering belongs in the agent nodes.",
     ],
     relatedIds: ['w3-1', 'w3-3', 'w3-4', 'w4-6'],
   },
@@ -1401,7 +1605,7 @@ plan = TaskPlan.model_validate_json(extract_json(response.content[0].text))`,
       },
     ],
     interviewTips: [
-      '"How do you add a tool without changing agent code?" — Implement Tool interface, register in the registry, restart. Agents discover it via to_claude_tools() on their next turn.',
+      '"How do you add a tool without changing agent code?" — Add a @tool-decorated function to the tools list, rebuild ToolNode. Agents pick it up automatically via bind_tools() on the next initialization.',
       '"How do you version a tool?" — Register the new version with a different version string. Default to "latest" which auto-selects the highest version. Old callers can pin to a version string.',
     ],
     gotchas: [
@@ -1521,49 +1725,63 @@ with tracer.span("tool.calculator", expression="25*47") as s:
   {
     id: 'w3-6',
     slug: 'retry-strategies',
-    title: 'Retry Strategies',
+    title: 'Retry Strategies (.with_retry)',
     file: '04_resiliency/retry_strategies.py',
     weekLabel: 'Week 3 — Resiliency',
     noApi: false,
     intro:
-      'External APIs fail. Rate limits hit. Networks hiccup. Retry logic is non-negotiable in production agents. The tenacity library makes this clean and configurable.',
+      'External APIs fail. Rate limits hit. Networks hiccup. Retry logic is non-negotiable in production agents. In LangGraph, .with_retry() and .with_fallbacks() are composable Runnable methods that apply to any LLM, chain, retriever, or ToolNode — no decorator needed.',
     concepts: [
       {
-        title: 'Exponential backoff',
-        body: 'Wait 2s after first failure, 4s after second, 8s after third, etc. Prevents overwhelming a struggling service by spacing retries exponentially. Always add a maximum wait (cap at 30-60s). The formula: wait = min(max_wait, initial_wait × 2^attempt).',
+        title: '.with_retry() — exponential backoff with jitter',
+        body: 'Call llm.with_retry(stop_after_attempt=3, wait_exponential_jitter=True) to wrap any Runnable with automatic retry logic. Jitter adds randomness to prevent thundering herd — all clients won\'t retry at the same millisecond. Returns a new Runnable with the same interface.',
         snippet: {
-          label: 'Exponential backoff with tenacity',
-          code: `from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+          label: '.with_retry() — composable retry on any Runnable',
+          code: `from core.client import get_llm, get_fast_llm
 
-@retry(
-    retry=retry_if_exception_type(anthropic.RateLimitError),
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=2, max=30),
+# Wrap the LLM with retry — same .invoke() interface
+llm_with_retry = get_llm().with_retry(
+    stop_after_attempt=3,
+    wait_exponential_jitter=True,  # jitter prevents thundering herd
 )
-def call_llm(messages):
-    return client.messages.create(model=MODEL, messages=messages, ...)`,
+
+result = llm_with_retry.invoke([HumanMessage(content=query)])
+# If a transient error occurs, retries automatically up to 3×`,
         },
       },
       {
-        title: 'Jitter',
-        body: 'Add randomness to the wait time. Without jitter, all clients that fail at the same moment retry at the same moment — causing a thundering herd and making the problem worse. With jitter: wait = exponential_wait × random(0.5, 1.5). tenacity\'s wait_random_exponential does this automatically.',
+        title: 'Jitter — prevents thundering herd',
+        body: 'Without jitter, all clients that fail at the same moment retry at the same moment — overloading the recovering service again. With jitter: wait = exponential_wait × random(0.5, 1.5). wait_exponential_jitter=True in .with_retry() enables this automatically.',
       },
       {
-        title: 'Model fallback chain',
-        body: 'If the primary model is rate-limited or unavailable, try a fallback model. This is different from retrying the same model — it\'s escalating to an alternative. Primary might be claude-sonnet-4-6; fallback is claude-haiku-4-5-20251001. The fallback gives worse but functional results.',
+        title: '.with_fallbacks() — escalate to a different model',
+        body: 'If retries exhaust on the primary model, .with_fallbacks() automatically tries the next model in the list. This is different from retrying — it\'s switching to an alternative. The fallback model gives worse but functional results while the primary recovers.',
+        snippet: {
+          label: '.with_fallbacks() — automatic model escalation',
+          code: `# Primary retries 3×, then falls back to fast model (also retried 2×)
+resilient_llm = (
+    get_llm()
+    .with_retry(stop_after_attempt=3, wait_exponential_jitter=True)
+    .with_fallbacks(
+        [get_fast_llm().with_retry(stop_after_attempt=2)],
+        exceptions_to_handle=(Exception,),
+    )
+)
+# Same interface — callers don't know which model responded`,
+        },
       },
       {
         title: 'When NOT to retry',
-        body: '400 Bad Request: your input is malformed — retrying won\'t help, fix the input. 401 Unauthorized: wrong API key. 404 Not Found: resource doesn\'t exist. DO retry: 429 Rate Limit, 500/503 Server Error, network timeouts (ConnectionError). Tenacity\'s retry_if_exception_type lets you be precise.',
+        body: '400 Bad Request: your input is malformed — retrying won\'t help, fix the input. 401 Unauthorized: wrong API key. 404 Not Found: resource doesn\'t exist. DO retry: 429 Rate Limit, 500/503 Server Error, network timeouts. .with_retry() retries on all exceptions by default; pass retry_if_exception_type to be selective.',
       },
     ],
     interviewTips: [
-      '"How do you handle LLM rate limits?" — Exponential backoff with jitter using tenacity. Typically 3-4 retry attempts, starting at 2s. For rate limit errors specifically, check the Retry-After header if available.',
-      '"When should you not retry?" — 4xx errors (bad request, auth error, not found) are not transient. Retrying wastes time. Only retry 5xx errors and 429 rate limits.',
+      '"How do you handle LLM rate limits in LangGraph?" — .with_retry(stop_after_attempt=3, wait_exponential_jitter=True) on the LLM. .with_fallbacks([backup_llm]) as the final escalation.',
+      '"When should you not retry?" — 4xx errors (bad request, auth error, not found) are not transient. Pass retry_if_exception_type to exclude them. Only retry 5xx and rate limits.',
     ],
     gotchas: [
-      "Don't retry on every exception — only on transient ones. Retrying a 400 in a loop wastes quota and adds latency with no benefit.",
-      'Set a total retry budget (max 3-4 attempts). Never retry indefinitely — an outage could cause your agent to hang for hours.',
+      ".with_retry() retries ALL exceptions by default — including 400 Bad Request. Pass retry_if_exception_type=(RateLimitError, ConnectionError) to be precise.",
+      'Set a total retry budget (stop_after_attempt=3-4). Never retry indefinitely — an outage could cause your agent to hang for hours.',
     ],
     relatedIds: ['w3-7', 'w3-2', 'w4-3'],
   },
@@ -1634,74 +1852,77 @@ raise MaxIterationsError(MAX_STEPS, last_action=last_tool_called)`,
   {
     id: 'w3-8',
     slug: 'structured-outputs',
-    title: 'Structured Outputs',
+    title: 'Structured Outputs (.with_structured_output)',
     file: '04_resiliency/structured_outputs.py',
     weekLabel: 'Week 3 — Resiliency',
     noApi: false,
     intro:
-      'LLMs naturally produce prose. Agents need machine-readable JSON. Structured output enforcement — with automatic re-prompting on failure — makes LLM output reliable enough to build on.',
+      'LLMs naturally produce prose. Agents need machine-readable Python objects. .with_structured_output(MyModel) handles schema injection, JSON parsing, and Pydantic validation in one method call — returning a typed instance directly. No extract_json(), no re-prompting loop needed.',
     concepts: [
       {
         title: 'The problem with free-form output',
-        body: 'Without structure, the same question returns "The total is $4.20", "$4.20", "Total: 4.2 dollars", etc. Parsing this with regex is fragile and breaks whenever the model changes its phrasing. Pydantic schemas define exactly what fields you expect and validate them automatically.',
+        body: 'Without structure, the same question returns "The total is $4.20", "$4.20", "Total: 4.2 dollars", etc. Parsing this with regex is fragile and breaks whenever the model changes phrasing. Pydantic schemas define exactly what fields you expect and validate them automatically.',
       },
       {
-        title: 'Schema-first prompting',
-        body: 'Include the Pydantic model\'s JSON Schema in the system prompt: "Respond with ONLY valid JSON matching this schema." Then parse the response with model_validate_json(). If parsing fails, inject the error message into the conversation and ask Claude to fix it.',
+        title: '.with_structured_output() — one line, typed result',
+        body: 'Call llm.with_structured_output(MyModel) to get a new Runnable. Invoking it returns a validated MyModel instance — not a string. LangChain injects the JSON schema, parses the response, and validates it. If validation fails internally, it retries automatically.',
         snippet: {
-          label: 'Schema-first prompting pattern',
-          code: `def structured_complete(prompt, schema, max_retries=3):
-    schema_str = json.dumps(schema.model_json_schema(), indent=2)
-    system = f"Respond ONLY with valid JSON matching this schema:\\n{schema_str}"
-    messages = [{"role": "user", "content": prompt}]
+          label: '.with_structured_output() — typed result in one call',
+          code: `from pydantic import BaseModel, Field
 
-    for attempt in range(max_retries):
-        response = client.messages.create(model=FAST_MODEL,
-                                          system=cached_system(system),
-                                          messages=messages, max_tokens=512)
-        raw = response.content[0].text.strip()
-        try:
-            return schema.model_validate_json(extract_json(raw))
-        except Exception as e:
-            # Feed the error back to Claude for self-correction
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({"role": "user", "content":
-                             f"JSON was invalid. Error: {e}\\nFix it."})
+class TaskPlan(BaseModel):
+    title: str
+    steps: list[str] = Field(..., min_length=1, max_length=10)
+    estimated_minutes: int = Field(..., ge=1, le=480)
+    confidence: float = Field(..., ge=0.0, le=1.0)
 
-    raise ValueError(f"Failed after {max_retries} attempts")`,
+# One line — schema injection + parsing + validation all handled internally
+structured_llm = get_fast_llm().with_structured_output(TaskPlan)
+plan: TaskPlan = structured_llm.invoke("Create a plan to build a RAG system.")
+
+# plan is already a validated TaskPlan instance
+print(plan.title)          # str
+print(plan.steps)          # list[str]
+print(plan.confidence)     # float, validated 0.0–1.0`,
         },
       },
       {
-        title: 'Re-prompting on failure',
-        body: 'About 5-15% of responses have JSON parse errors (malformed, wrong fields, wrong types). Injecting the parse error back into the conversation allows Claude to self-correct. 90%+ of errors are fixed on the first re-prompt. Set max_retries=3 and raise after exhausting retries.',
+        title: 'Using it inside a StateGraph node',
+        body: '.with_structured_output() returns a Runnable, so it composes with the rest of LangGraph naturally. Call it inside any node function to get typed, validated output from the LLM as part of your graph.',
+        snippet: {
+          label: '.with_structured_output() inside a graph node',
+          code: `class ValidationReport(BaseModel):
+    overall_score: float
+    approved: bool
+    summary: str
+
+def validator_node(state: PlanExecuteState) -> dict:
+    task = state["messages"][0].content
+    results = state["past_steps"]
+
+    report: ValidationReport = (
+        get_fast_llm()
+        .with_structured_output(ValidationReport)
+        .invoke([
+            SystemMessage("You are a quality validator."),
+            HumanMessage(f"Task: {task}\\n\\nResults: {results}\\n\\nValidate."),
+        ])
+    )
+    return {"past_steps": [("__validation__", str(report.model_dump()))]}`,
+        },
       },
       {
-        title: 'Extracting JSON from prose',
-        body: 'Even with "respond with only JSON", models sometimes add preamble ("Here is the JSON: {…}") or postamble. Extract the JSON object by finding the first { and the matching closing }.',
-        snippet: {
-          label: 'Robust JSON extraction',
-          code: `def extract_json(text: str) -> str:
-    start = text.find("{")
-    if start == -1:
-        return text
-    depth = 0
-    for i, char in enumerate(text[start:], start):
-        if char == "{": depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start:i+1]
-    return text[start:]`,
-        },
+        title: 'When .with_structured_output() is not enough',
+        body: 'For very complex nested schemas with cross-field dependencies, the LLM sometimes fails validation repeatedly. In those cases, use a manual re-prompting loop: inject the Pydantic validation error back into the conversation and ask the LLM to fix it. This is the pattern shown in the reference file.',
       },
     ],
     interviewTips: [
-      '"How do you make LLM output reliable?" — Define a Pydantic schema, include it in the system prompt, validate the response. On parse error, re-prompt with the error message. 90% of errors self-correct.',
-      '"What\'s the advantage of Pydantic over manual JSON parsing?" — Pydantic validates types, required fields, value ranges, and patterns automatically. You get typed Python objects, not raw dicts.',
+      '"How do you make LLM output reliable in LangGraph?" — llm.with_structured_output(MyModel) handles schema injection, parsing, and Pydantic validation in one call. Returns a typed Python object.',
+      '"When would you still use a manual re-prompting loop?" — When .with_structured_output() fails repeatedly on a complex schema, or when you need to log each failed attempt for debugging.',
     ],
     gotchas: [
-      "Include the schema in the SYSTEM prompt (cached), not the user message. This saves tokens on every retry.",
-      "Large Pydantic schemas with many fields can confuse the model. Split complex schemas into smaller ones with multiple calls.",
+      ".with_structured_output() retries internally, but you don't control how many times. For mission-critical extraction, wrap it in .with_retry() or add a manual fallback.",
+      "Large Pydantic schemas with many interdependent fields can still fail. Split complex extractions into two smaller schemas with separate LLM calls.",
     ],
     relatedIds: ['w3-5', 'w4-2', 'w2-9'],
   },

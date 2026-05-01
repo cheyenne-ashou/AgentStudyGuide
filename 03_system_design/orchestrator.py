@@ -1,172 +1,130 @@
 """
-Orchestrator Pattern
-Central brain that routes tasks to specialized sub-agents and aggregates results.
+Orchestrator / Supervisor Pattern (LangGraph)
+Central supervisor that routes tasks to specialized sub-agents
+using Command(goto=...) and aggregates results.
 
-The orchestrator doesn't do the work — it decides WHO does the work.
-Each sub-agent is specialized (researcher, calculator, writer).
-The orchestrator coordinates them and synthesizes a final response.
+The supervisor doesn't do the work — it decides WHO does the work.
+Each sub-agent is specialized (researcher, calculator, summarizer).
+Command(goto=...) is LangGraph's native routing primitive, replacing
+hand-written if/elif routing logic.
 
-Architecture:
-  User → Orchestrator → [SubAgent1, SubAgent2, SubAgent3] → Aggregate → Response
+Architecture (as a LangGraph):
+  User → supervisor → [researcher | calculator | summarizer] → supervisor → END
 
 Run: python 03_system_design/orchestrator.py
 """
 import sys
+import re
 import time
 from pathlib import Path
-from typing import Callable, Any
+from typing import Literal
 
 _root = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").exists())
 sys.path.insert(0, str(_root))
 
-from core.client import get_client, MODEL, FAST_MODEL, cached_system
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langgraph.graph import StateGraph, END
+from langgraph.types import Command
+from core.client import get_llm, get_fast_llm
+from core.models import SupervisorState
 from core.logger import get_logger
 
 log = get_logger(__name__)
 
-
-class AgentResult:
-    def __init__(self, agent_name: str, result: Any, duration_ms: float):
-        self.agent_name = agent_name
-        self.result = result
-        self.duration_ms = duration_ms
-        self.success = not isinstance(result, Exception)
-
-    def __repr__(self) -> str:
-        status = "OK" if self.success else "FAIL"
-        return f"AgentResult({self.agent_name}, {status}, {self.duration_ms:.0f}ms)"
+MEMBERS = ["researcher", "calculator", "summarizer"]
+OPTIONS = MEMBERS + ["FINISH"]
 
 
-AgentFn = Callable[[str], str]
+# ── Supervisor node ───────────────────────────────────────────────────────────
+
+SUPERVISOR_PROMPT = (
+    f"You are a supervisor coordinating these agents: {', '.join(MEMBERS)}.\n"
+    "Given the conversation, decide who should act next, or FINISH if done.\n"
+    f"Reply with ONLY one of: {', '.join(OPTIONS)}."
+)
 
 
-class Orchestrator:
-    """
-    Routes tasks to registered sub-agents.
-    Each agent is a function: (task: str) -> str
-    """
+def supervisor_node(state: SupervisorState) -> Command[Literal["researcher", "calculator", "summarizer", "__end__"]]:
+    """Route to the best specialist, or finish if the task is complete."""
+    messages = [SystemMessage(content=SUPERVISOR_PROMPT)] + state["messages"]
+    response = get_fast_llm().invoke(messages)
+    next_agent = response.content.strip()
 
-    def __init__(self):
-        self._agents: dict[str, tuple[AgentFn, str]] = {}
-        self._client = get_client()
+    # Clean up any surrounding punctuation
+    next_agent = next_agent.strip("'\".,;").strip()
 
-    def register(self, name: str, fn: AgentFn, description: str = "") -> "Orchestrator":
-        self._agents[name] = (fn, description)
-        log.info("orchestrator.register", agent=name)
-        return self
+    if next_agent not in OPTIONS:
+        next_agent = "FINISH"
 
-    def run_agent(self, name: str, task: str) -> AgentResult:
-        if name not in self._agents:
-            raise KeyError(f"Agent '{name}' not registered. Available: {list(self._agents)}")
-        fn, _ = self._agents[name]
-        start = time.perf_counter()
-        try:
-            result = fn(task)
-            return AgentResult(name, result, (time.perf_counter() - start) * 1000)
-        except Exception as e:
-            log.error("orchestrator.agent_error", agent=name, error=str(e))
-            return AgentResult(name, e, (time.perf_counter() - start) * 1000)
+    log.info("supervisor.route", next_agent=next_agent)
+    print(f"\n  [Supervisor] → {next_agent}")
 
-    def route(self, user_request: str) -> str:
-        """
-        Use the LLM to decide which agent(s) to invoke, then aggregate.
-        In production this could be a classifier or embedding-based router.
-        """
-        agent_descriptions = "\n".join(
-            f"- {name}: {desc}" for name, (_, desc) in self._agents.items()
-        )
-        routing_prompt = (
-            f"Available agents:\n{agent_descriptions}\n\n"
-            f"User request: {user_request}\n\n"
-            "Which agent(s) should handle this? Reply with a comma-separated list of agent names only. "
-            "Example: researcher,calculator"
-        )
-        response = self._client.messages.create(
-            model=FAST_MODEL,
-            max_tokens=50,
-            messages=[{"role": "user", "content": routing_prompt}],
-        )
-        selected = [s.strip() for s in response.content[0].text.strip().split(",")]
-        selected = [s for s in selected if s in self._agents]
-
-        log.info("orchestrator.route", selected=selected, request=user_request[:60])
-        print(f"\n  [Orchestrator] Routing to: {selected}")
-
-        results = [self.run_agent(name, user_request) for name in selected]
-
-        # Aggregate results
-        if len(results) == 1:
-            return str(results[0].result)
-
-        parts = [f"[{r.agent_name}]: {r.result}" for r in results if r.success]
-        synthesis_prompt = (
-            f"Original request: {user_request}\n\n"
-            f"Results from specialized agents:\n" + "\n\n".join(parts) +
-            "\n\nSynthesize these results into a single coherent response."
-        )
-        synthesis = self._client.messages.create(
-            model=FAST_MODEL,
-            max_tokens=512,
-            messages=[{"role": "user", "content": synthesis_prompt}],
-        )
-        return synthesis.content[0].text.strip()
-
-    def describe(self) -> None:
-        print(f"Orchestrator with {len(self._agents)} agents:")
-        for name, (_, desc) in self._agents.items():
-            print(f"  {name:<20} {desc}")
+    if next_agent == "FINISH":
+        return Command(goto=END)
+    return Command(goto=next_agent, update={"next_agent": next_agent})
 
 
-# ── Specialist agents ────────────────────────��────────────────────────────────
+# ── Specialist agent nodes ────────────────────────────────────────────────────
 
-def make_researcher(client) -> AgentFn:
-    def researcher(task: str) -> str:
-        response = client.messages.create(
-            model=FAST_MODEL,
-            max_tokens=300,
-            system=cached_system("You are a research agent. Provide factual, concise information."),
-            messages=[{"role": "user", "content": f"Research task: {task}"}],
-        )
-        return response.content[0].text.strip()
-    return researcher
-
-
-def make_calculator(_) -> AgentFn:
-    import math
-    def calculator(task: str) -> str:
-        # For demo: extract and evaluate any numbers in the task
-        import re
-        numbers = re.findall(r"\d+(?:\.\d+)?", task)
-        if len(numbers) >= 2:
-            a, b = float(numbers[0]), float(numbers[1])
-            return f"Calculation result: {a} * {b} = {a * b}"
-        return "No calculation needed."
-    return calculator
+def researcher_node(state: SupervisorState) -> Command[Literal["supervisor"]]:
+    """Research agent: provides factual information."""
+    task = state["messages"][-1].content
+    response = get_fast_llm().invoke([
+        SystemMessage(content="You are a research agent. Provide factual, concise information."),
+        HumanMessage(content=f"Research task: {task}"),
+    ])
+    result = AIMessage(content=f"[Researcher] {response.content}", name="researcher")
+    log.info("researcher.complete", preview=response.content[:60])
+    return Command(goto="supervisor", update={"messages": [result]})
 
 
-def make_summarizer(client) -> AgentFn:
-    def summarizer(task: str) -> str:
-        response = client.messages.create(
-            model=FAST_MODEL,
-            max_tokens=200,
-            system="You are a summarizer. Be extremely concise.",
-            messages=[{"role": "user", "content": f"Summarize this in 2 sentences: {task}"}],
-        )
-        return response.content[0].text.strip()
-    return summarizer
+def calculator_node(state: SupervisorState) -> Command[Literal["supervisor"]]:
+    """Calculator agent: extracts and evaluates math expressions."""
+    task = state["messages"][-1].content
+    numbers = re.findall(r"\d+(?:\.\d+)?", task)
+    if len(numbers) >= 2:
+        a, b = float(numbers[0]), float(numbers[1])
+        result_text = f"Calculation: {a} × {b} = {a * b}"
+    else:
+        result_text = "No numeric calculation found in the request."
+    result = AIMessage(content=f"[Calculator] {result_text}", name="calculator")
+    log.info("calculator.complete", preview=result_text[:60])
+    return Command(goto="supervisor", update={"messages": [result]})
+
+
+def summarizer_node(state: SupervisorState) -> Command[Literal["supervisor"]]:
+    """Summarizer agent: condenses information to key points."""
+    task = state["messages"][-1].content
+    response = get_fast_llm().invoke([
+        SystemMessage(content="You are a summarizer. Be extremely concise."),
+        HumanMessage(content=f"Summarize in 2 sentences: {task}"),
+    ])
+    result = AIMessage(content=f"[Summarizer] {response.content}", name="summarizer")
+    log.info("summarizer.complete", preview=response.content[:60])
+    return Command(goto="supervisor", update={"messages": [result]})
+
+
+# ── Build the graph ───────────────────────────────────────────────────────────
+
+def build_supervisor_graph():
+    workflow = StateGraph(SupervisorState)
+
+    workflow.add_node("supervisor", supervisor_node)
+    workflow.add_node("researcher", researcher_node)
+    workflow.add_node("calculator", calculator_node)
+    workflow.add_node("summarizer", summarizer_node)
+
+    # All nodes use Command(goto=...) for routing — no explicit add_edge needed
+    workflow.set_entry_point("supervisor")
+    return workflow.compile()
 
 
 if __name__ == "__main__":
-    print("=== ORCHESTRATOR DEMO ===\n")
-    client = get_client()
-
-    orchestrator = Orchestrator()
-    orchestrator.register("researcher", make_researcher(client), "Researches facts and provides information")
-    orchestrator.register("calculator", make_calculator(client), "Performs mathematical calculations")
-    orchestrator.register("summarizer", make_summarizer(client), "Summarizes long text into key points")
-
-    orchestrator.describe()
+    print("=== SUPERVISOR PATTERN DEMO (LangGraph) ===\n")
+    print(f"Agents: {', '.join(MEMBERS)}")
     print()
+
+    agent = build_supervisor_graph()
 
     tasks = [
         "What is RAG and how does it work?",
@@ -177,11 +135,21 @@ if __name__ == "__main__":
     for task in tasks:
         print(f"\n{'='*60}")
         print(f"Request: {task}")
-        result = orchestrator.route(task)
-        print(f"\nResult: {result[:300]}")
+        result = agent.invoke(
+            {"messages": [HumanMessage(content=task)], "next_agent": ""},
+        )
+        # Last AI message is the final result
+        ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
+        if ai_messages:
+            print(f"\nResult: {ai_messages[-1].content[:300]}")
 
     print("\n--- Design Patterns Shown ---")
-    print("  1. Single responsibility: each agent does one thing well")
-    print("  2. LLM-based routing: model decides which specialist to use")
-    print("  3. Result aggregation: synthesize multi-agent outputs")
+    print("  1. Command(goto=...) replaces hand-written routing if/elif chains")
+    print("  2. Single responsibility: each agent node does one thing well")
+    print("  3. Supervisor loop: supervisor → specialist → supervisor → ... → END")
     print("  4. Centralized logging: every routing decision is traced")
+
+    print("\n--- Command(goto=...) vs old pattern ---")
+    print("  Old: if 'researcher' in selected: run_agent('researcher', task)")
+    print("  New: return Command(goto='researcher', update={'messages': [...]})")
+    print("       LangGraph handles the routing, state merging, and loop control")

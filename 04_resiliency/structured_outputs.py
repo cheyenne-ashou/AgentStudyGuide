@@ -1,36 +1,43 @@
 """
-Structured Outputs — JSON Enforcement
-Forces LLM responses into a defined schema, with re-prompting on failure.
+Structured Outputs — .with_structured_output()
+Forces LLM responses into a defined Pydantic schema with one method call.
 
-The problem: LLMs are trained to be helpful, not machine-readable.
-Without enforcement, you get inconsistent formats, missing fields, prose instead of JSON.
-
-The solution:
+The old pattern:
   1. Tell the model to respond in JSON
-  2. Validate with Pydantic
-  3. If invalid, re-prompt with the error message
-  4. After max retries, raise or return a default
+  2. Extract JSON from the text (fragile)
+  3. Validate with Pydantic
+  4. If invalid, re-prompt with the error message
+  5. After max retries, raise
+
+The new pattern:
+  structured_llm = llm.with_structured_output(MyModel)
+  result = structured_llm.invoke("...")  ← returns a validated MyModel instance
+
+.with_structured_output() handles schema injection, parsing, and Pydantic validation
+internally. The extract_json() function and retry loop become unnecessary.
+
+When .with_structured_output() is NOT enough:
+  - Very complex nested extraction with cross-field dependencies
+  - When you need to validate business rules beyond type constraints
+  - When the model systematically fails on a particular schema (use the re-prompting
+    loop as a fallback)
 
 Run: python 04_resiliency/structured_outputs.py
 """
 import sys
-import json
 from pathlib import Path
-from typing import TypeVar, Type
 
 _root = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").exists())
 sys.path.insert(0, str(_root))
 
 from pydantic import BaseModel, Field
-from core.client import get_client, MODEL, FAST_MODEL, cached_system
+from core.client import get_llm, get_fast_llm
 from core.logger import get_logger
 
 log = get_logger(__name__)
 
-T = TypeVar("T", bound=BaseModel)
 
-
-# ── Schema definitions ────────────────────────────────────────────────────────
+# ── Schema definitions (unchanged from the old version) ───────────────────────
 
 class TaskPlan(BaseModel):
     title: str
@@ -54,86 +61,15 @@ class AgentDecision(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0)
 
 
-# ── JSON extraction utilities ─────────────────────────────────────────────────
-
-def extract_json(text: str) -> str:
-    """Extract JSON from a response that may contain prose around it."""
-    # Try to find a JSON object
-    start = text.find("{")
-    if start == -1:
-        return text
-    # Find the matching closing brace
-    depth = 0
-    for i, char in enumerate(text[start:], start):
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-    return text[start:]
-
-
-def structured_complete(
-    prompt: str,
-    schema: Type[T],
-    system: str = "",
-    max_retries: int = 3,
-    model: str = FAST_MODEL,
-) -> T:
-    """
-    Ask the LLM to respond as JSON matching the given Pydantic schema.
-    Re-prompts with validation errors on failure.
-    """
-    client = get_client()
-
-    schema_str = json.dumps(schema.model_json_schema(), indent=2)
-    base_system = (
-        f"{system}\n\n"
-        f"IMPORTANT: Respond with ONLY valid JSON matching this exact schema. "
-        f"No prose, no markdown, no code blocks — just the JSON object.\n\n"
-        f"Schema:\n{schema_str}"
-    )
-
-    messages = [{"role": "user", "content": prompt}]
-
-    for attempt in range(1, max_retries + 1):
-        response = client.messages.create(
-            model=model,
-            max_tokens=512,
-            system=cached_system(base_system),
-            messages=messages,
-        )
-        raw = response.content[0].text.strip()
-        json_str = extract_json(raw)
-
-        try:
-            data = json.loads(json_str)
-            result = schema.model_validate(data)
-            log.info("structured_output.success", attempt=attempt, schema=schema.__name__)
-            return result
-        except Exception as e:
-            log.warning("structured_output.retry", attempt=attempt, error=str(e)[:100])
-            if attempt < max_retries:
-                # Inject the error into the conversation so Claude can self-correct
-                messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user",
-                    "content": f"The JSON was invalid. Error: {e}\n\nPlease fix it and respond with valid JSON only."
-                })
-
-    raise ValueError(f"Failed to get valid {schema.__name__} after {max_retries} attempts")
-
-
 if __name__ == "__main__":
-    print("=== STRUCTURED OUTPUTS DEMO ===\n")
+    print("=== STRUCTURED OUTPUTS DEMO (.with_structured_output()) ===\n")
+
+    llm = get_fast_llm()
 
     # ── Demo 1: Task planning ─────────────────────────────────────────────────
     print("--- Demo 1: Task Plan ---")
-    plan = structured_complete(
-        prompt="Create a plan to build a simple RAG system in Python.",
-        schema=TaskPlan,
-        system="You are a project planning assistant.",
+    plan: TaskPlan = llm.with_structured_output(TaskPlan).invoke(
+        "Create a plan to build a simple RAG system in Python."
     )
     print(f"  Title:      {plan.title}")
     print(f"  Steps:      {len(plan.steps)}")
@@ -145,28 +81,24 @@ if __name__ == "__main__":
 
     # ── Demo 2: Sentiment analysis ───────────────────────────────────────────
     print("\n--- Demo 2: Sentiment Analysis ---")
+    structured_sentiment = llm.with_structured_output(SentimentResult)
     texts = [
         "This RAG implementation is brilliant! Works perfectly.",
         "The agent keeps hallucinating and it's incredibly frustrating.",
         "The system processes requests in about 2 seconds.",
     ]
     for text in texts:
-        result = structured_complete(
-            prompt=f"Analyze the sentiment of this text: '{text}'",
-            schema=SentimentResult,
+        result: SentimentResult = structured_sentiment.invoke(
+            f"Analyze the sentiment of this text: '{text}'"
         )
         print(f"  {result.sentiment:>8} ({result.score:+.2f})  {text[:50]}")
 
     # ── Demo 3: Agent decision ────────────────────────────────────────────────
     print("\n--- Demo 3: Agent Decision ---")
-    decision = structured_complete(
-        prompt=(
-            "You are an agent. The user asked: 'What is the current price of AAPL?'\n"
-            "Available tools: web_search, calculator, get_datetime.\n"
-            "What should you do next?"
-        ),
-        schema=AgentDecision,
-        system="You are a decision-making agent.",
+    decision: AgentDecision = llm.with_structured_output(AgentDecision).invoke(
+        "You are an agent. The user asked: 'What is the current price of AAPL?'\n"
+        "Available tools: web_search, calculator, get_datetime.\n"
+        "What should you do next?"
     )
     print(f"  Action:     {decision.action}")
     print(f"  Tool:       {decision.tool_name}")
@@ -174,8 +106,19 @@ if __name__ == "__main__":
     print(f"  Reasoning:  {decision.reasoning[:100]}")
     print(f"  Confidence: {decision.confidence}")
 
+    print("\n--- .with_structured_output() vs old extract_json() pattern ---")
+    print("  Old: 30-line structured_complete() with:")
+    print("       1. schema_str injection into system prompt")
+    print("       2. extract_json() to find { } in the response")
+    print("       3. json.loads() + Pydantic.model_validate()")
+    print("       4. re-prompting loop on validation failure")
+    print()
+    print("  New: structured_llm = llm.with_structured_output(MyModel)")
+    print("       result = structured_llm.invoke('your prompt')  ← done")
+    print("       result is already a validated MyModel instance")
+
     print("\n--- Why Structured Outputs Matter ---")
     print("  Agents need to parse tool call inputs, plans, decisions.")
     print("  Free-form text requires fragile regex parsing.")
     print("  Pydantic schemas: self-documenting, validated, type-safe.")
-    print("  Re-prompting: 90%+ of JSON errors self-correct on retry.")
+    print("  .with_structured_output() handles the entire extraction pipeline.")

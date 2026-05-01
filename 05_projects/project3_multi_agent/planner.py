@@ -1,30 +1,31 @@
 """
 Project 3: Multi-Agent Workflow — Planner
-Decomposes a complex task into a structured, executable step list.
-Each step specifies what to do and which tool (if any) to use.
+Decomposes a complex task into a structured, executable step list using
+.with_structured_output() to guarantee a validated TaskPlan object.
 """
 import sys
-import json
 from pathlib import Path
 
 _root = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").exists())
 sys.path.insert(0, str(_root))
 
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
-from core.client import get_client, MODEL, cached_system
+from core.client import get_llm
 from core.logger import get_logger
 
 log = get_logger(__name__)
 
 PLANNER_SYSTEM = """You are a planning agent. When given a task, decompose it into
-clear, sequential steps. Each step should be specific and actionable.
-Respond with ONLY valid JSON — no prose, no markdown."""
+clear, sequential steps. Each step should be specific and actionable."""
+
+TOOLS_AVAILABLE = ["web_search", "calculator", "get_datetime", "none"]
 
 
 class TaskStep(BaseModel):
     step_number: int
     description: str
-    tool: str = Field(description="One of: web_search, calculator, get_datetime, none")
+    tool: str = Field(description=f"One of: {', '.join(TOOLS_AVAILABLE)}")
     expected_output: str
 
 
@@ -35,39 +36,16 @@ class TaskPlan(BaseModel):
 
 
 def create_plan(task: str) -> TaskPlan:
-    client = get_client()
+    """Generate a structured plan using .with_structured_output()."""
+    structured_llm = get_llm().with_structured_output(TaskPlan)
 
-    schema = {
-        "task": "string",
-        "steps": [
-            {
-                "step_number": "int",
-                "description": "string",
-                "tool": "web_search | calculator | get_datetime | none",
-                "expected_output": "string",
-            }
-        ],
-        "total_steps": "int",
-    }
-
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=1024,
-        system=cached_system(PLANNER_SYSTEM),
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Task: {task}\n\n"
-                f"Create a step-by-step plan. Use this JSON schema:\n"
-                f"{json.dumps(schema, indent=2)}"
-            ),
-        }],
-    )
-
-    raw = response.content[0].text.strip()
-    start = raw.find("{")
-    end = raw.rfind("}") + 1
-    plan = TaskPlan.model_validate_json(raw[start:end])
+    plan: TaskPlan = structured_llm.invoke([
+        SystemMessage(content=(
+            f"{PLANNER_SYSTEM}\n"
+            f"Available tools: {', '.join(TOOLS_AVAILABLE)}"
+        )),
+        HumanMessage(content=f"Task: {task}"),
+    ])
 
     log.info("planner.complete", task=task[:50], steps=len(plan.steps))
     return plan

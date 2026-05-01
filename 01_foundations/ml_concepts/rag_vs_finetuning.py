@@ -1,6 +1,6 @@
 """
 RAG vs Fine-tuning vs Prompting
-Prints a decision framework and asks Claude to explain the tradeoffs.
+Prints a decision framework and asks the LLM to explain the tradeoffs.
 Know this cold — it comes up in every agentic AI interview.
 
 Run: python 01_foundations/ml_concepts/rag_vs_finetuning.py
@@ -11,7 +11,10 @@ from pathlib import Path
 _root = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").exists())
 sys.path.insert(0, str(_root))
 
-from core.client import get_client, FAST_MODEL, cached_system
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import SystemMessage
+from langchain_core.output_parsers import StrOutputParser
+from core.client import get_fast_llm
 
 DECISION_TABLE = """
 ┌─────────────────────┬─────────────────┬──────────────────┬──────────────────┐
@@ -55,25 +58,23 @@ Use RAG + FINE-TUNING when:
   → Example: customer support bot with company docs + formal tone
 """
 
+SYSTEM = (
+    "You are an AI systems expert preparing a candidate for a senior engineering interview. "
+    "Give concise, technically precise answers with real-world examples."
+)
 
-def get_claude_explanation(client) -> str:
-    system = cached_system(
-        "You are an AI systems expert preparing a candidate for a senior engineering interview. "
-        "Give concise, technically precise answers with real-world examples."
-    )
-    response = client.messages.create(
-        model=FAST_MODEL,
-        max_tokens=500,
-        system=system,
-        messages=[{
-            "role": "user",
-            "content": (
-                "In 4-5 sentences, explain when you would choose RAG over fine-tuning "
-                "for an enterprise AI assistant. Give a concrete example."
-            ),
-        }],
-    )
-    return response.content[0].text.strip()
+QUESTION = (
+    "In 4-5 sentences, explain when you would choose RAG over fine-tuning "
+    "for an enterprise AI assistant. Give a concrete example."
+)
+
+
+def get_llm_explanation() -> str:
+    chain = ChatPromptTemplate.from_messages([
+        ("system", SYSTEM),
+        ("human", "{question}"),
+    ]) | get_fast_llm() | StrOutputParser()
+    return chain.invoke({"question": QUESTION})
 
 
 if __name__ == "__main__":
@@ -81,9 +82,8 @@ if __name__ == "__main__":
     print(DECISION_TABLE)
     print(DECISION_TREE)
 
-    print("--- Claude's Interview-Ready Explanation ---")
-    client = get_client()
-    print(get_claude_explanation(client))
+    print("--- LLM's Interview-Ready Explanation ---")
+    print(get_llm_explanation())
 
     print("\n--- One-Line Interview Answer ---")
     print("'RAG for dynamic knowledge with citations; fine-tuning for style/format adaptation.")

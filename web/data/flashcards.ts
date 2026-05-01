@@ -152,8 +152,8 @@ export const flashcards: Flashcard[] = [
     id: 'react',
     term: 'ReAct Pattern',
     definition:
-      'Reason + Act: the agent alternates between text (thinking) and tool calls (acting). Loop: Thought → Action → Observation → repeat until done.',
-    why: 'The foundational agent pattern. All major frameworks (LangChain, LangGraph, AutoGen) implement a variation of this.',
+      'Reason + Act: the agent alternates between text (thinking) and tool calls (acting). In LangGraph, implemented as a StateGraph with an agent node and ToolNode connected by a conditional edge.',
+    why: 'The foundational agent pattern. create_react_agent() is the LangGraph shorthand; build it explicitly with StateGraph to understand the loop.',
     category: 'agent',
   },
   {
@@ -168,7 +168,7 @@ export const flashcards: Flashcard[] = [
     id: 'tool-calling',
     term: 'Tool Calling / Function Calling',
     definition:
-      'LLM outputs a structured request (name + arguments). Your code executes it and returns the result. Claude calls this `tool_use` blocks.',
+      'LLM outputs a structured request (name + arguments). In LangGraph, decorate Python functions with @tool and bind them with llm.bind_tools(). ToolNode executes them automatically.',
     why: 'Gives agents capabilities beyond the base model: search, code execution, database access, API calls.',
     category: 'agent',
   },
@@ -176,25 +176,81 @@ export const flashcards: Flashcard[] = [
     id: 'tool-registry',
     term: 'Tool Registry',
     definition:
-      'Central registry of available tools with schemas, descriptions, version metadata, and access control. Agents discover tools from it dynamically.',
-    why: 'Decouples agent code from tool implementations. Swap, version, or restrict tools without touching agent logic.',
+      'In LangGraph, tools are plain Python functions decorated with @tool. The decorator reads the docstring and signature to build the JSON schema automatically. ToolNode dispatches calls.',
+    why: 'Decouples agent code from tool implementations. @tool replaces hand-written JSON schemas and manual dispatch loops.',
     category: 'agent',
   },
   {
     id: 'orchestrator',
-    term: 'Orchestrator',
+    term: 'Orchestrator / Supervisor',
     definition:
-      'A coordinator agent that routes tasks to specialist sub-agents (researcher, calculator, writer), then aggregates their results.',
-    why: 'Enables multi-agent systems with single responsibility. Centralizes control flow and makes the system debuggable.',
+      'A coordinator node that routes tasks to specialist sub-agents using Command(goto=...). Each specialist returns Command(goto="supervisor") when done.',
+    why: 'Enables multi-agent systems with single responsibility. Command(goto=...) replaces hand-written routing if/elif chains.',
+    category: 'agent',
+  },
+  {
+    id: 'stategraph',
+    term: 'StateGraph',
+    definition:
+      'LangGraph\'s core class. A directed graph where each node is a Python function that reads and updates shared TypedDict state. Edges (including conditional) determine which node runs next.',
+    why: 'Replaces hand-written while loops with an explicit, inspectable control flow. The graph IS the agent loop.',
+    category: 'agent',
+  },
+  {
+    id: 'typeddict-state',
+    term: 'TypedDict State',
+    definition:
+      'A Python TypedDict that flows through all LangGraph nodes. Fields with add_messages annotation automatically append rather than overwrite. Checkpointers persist it between invocations.',
+    why: 'Shared state is what makes multi-node graphs coherent. add_messages lets each node append to history without reading the full list first.',
+    category: 'agent',
+  },
+  {
+    id: 'toolnode',
+    term: 'ToolNode',
+    definition:
+      'A pre-built LangGraph node that reads tool_calls from the last AIMessage, executes each tool, and returns ToolMessages with the results. Replaces the manual "for block in response.content" loop.',
+    why: 'One line replaces a 10-line loop. Used in create_react_agent() and any custom graph that needs to execute tool calls.',
+    category: 'agent',
+  },
+  {
+    id: 'create-react-agent',
+    term: 'create_react_agent()',
+    definition:
+      'A LangGraph prebuilt function that constructs a standard ReAct StateGraph in one call: agent node + ToolNode + conditional edge. Takes model, tools, and optional checkpointer/system prompt.',
+    why: 'Use for simple agents. Switch to an explicit StateGraph when you need conditional branching, multiple agents, or non-standard state.',
+    category: 'agent',
+  },
+  {
+    id: 'command-goto',
+    term: 'Command(goto=...)',
+    definition:
+      'The return type from a LangGraph supervisor node that specifies which node to route to next. Command(goto="researcher") routes to the researcher node. Command(goto=END) finishes.',
+    why: 'Makes routing explicit and inspectable. Replaces hand-written if/elif routing logic embedded inside node functions.',
     category: 'agent',
   },
   // ── Memory ───────────────────────────────────────────────────────────────────
   {
+    id: 'memorysaver',
+    term: 'MemorySaver',
+    definition:
+      'LangGraph\'s in-memory checkpointer. Persists graph state (including full message history) keyed by thread_id after every node. Use SqliteSaver or RedisSaver in production.',
+    why: 'Enables multi-turn conversations without manual message list management. The same thread_id automatically continues the conversation.',
+    category: 'memory',
+  },
+  {
+    id: 'interrupt-resume',
+    term: 'interrupt() + Command(resume=...)',
+    definition:
+      'LangGraph primitives for human-in-the-loop. interrupt() pauses graph execution at a node boundary and surfaces data to the caller. The graph resumes when Command(resume=<value>) is passed.',
+    why: 'Replaces blocking input() calls. State is preserved in the checkpointer so the human can respond hours later.',
+    category: 'agent',
+  },
+  {
     id: 'short-term-memory',
     term: 'Short-Term Memory',
     definition:
-      'The `messages` array passed to the LLM each turn. Lives in the context window. Disappears when the session ends.',
-    why: 'Limited by context window size. Managed with rolling window (drop oldest) or summarization (compress old turns).',
+      'The messages list in LangGraph\'s AgentState. Managed by MemorySaver via thread_id. For overflow: add a summarization node or use trim_messages().',
+    why: 'Limited by context window size. Rolling window (drop oldest) and summarization (compress old turns) are the classic mitigation strategies.',
     category: 'memory',
   },
   {
@@ -240,10 +296,26 @@ export const flashcards: Flashcard[] = [
   },
   {
     id: 'structured-outputs',
-    term: 'Structured Outputs',
+    term: 'Structured Outputs (.with_structured_output)',
     definition:
-      'Forcing LLM responses into a defined JSON schema using system prompts and Pydantic validation, with automatic re-prompting on parse failures.',
-    why: 'Agents need machine-readable outputs for tool inputs, plans, and decisions. Free-form text requires fragile regex parsing.',
+      'llm.with_structured_output(MyModel) wraps an LLM so it injects the JSON schema, parses the response, and validates with Pydantic — returning a typed Python object, not a string.',
+    why: 'Replaces manual JSON extraction + re-prompting loops. One method call handles schema injection, parsing, and validation.',
+    category: 'resiliency',
+  },
+  {
+    id: 'lcel',
+    term: 'LCEL (|)',
+    definition:
+      'LangChain Expression Language. The | operator composes Runnable objects (prompts, LLMs, parsers, retrievers) into a chain. chain = prompt | llm | StrOutputParser().',
+    why: 'Replaces raw client.messages.create() calls with declarative, composable pipelines. All Runnables share .invoke(), .stream(), and .batch() interfaces.',
+    category: 'system-design',
+  },
+  {
+    id: 'with-retry-fallback',
+    term: '.with_retry() / .with_fallbacks()',
+    definition:
+      'Composable Runnable methods. .with_retry(stop_after_attempt=3) retries on transient errors. .with_fallbacks([backup_llm]) switches to a backup if retries are exhausted.',
+    why: 'Replaces tenacity @retry decorators and custom ModelFallbackChain classes. Works on any Runnable: LLMs, chains, retrievers, ToolNode.',
     category: 'resiliency',
   },
   {

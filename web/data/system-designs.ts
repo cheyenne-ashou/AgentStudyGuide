@@ -22,19 +22,19 @@ export const systemDesigns: SystemDesign[] = [
 │  API Gateway ──── Auth / Rate Limiting / Input Validation        │
 │   │                                                              │
 │   ▼                                                              │
-│  Agent Orchestrator (ReAct loop, max_steps, timeouts)            │
+│  LangGraph StateGraph (ReAct: agent ↔ ToolNode, recursion_limit) │
 │   │         │                                                    │
-│   │         ├──► LLM Gateway ──── claude-sonnet-4-6             │
-│   │         │         └────────── claude-haiku (fallback)        │
+│   │         ├──► Resilient LLM ── claude-sonnet-4-6             │
+│   │         │    (.with_retry() + .with_fallbacks([haiku]))      │
 │   │         │                                                    │
-│   │         ├──► Tool Registry                                   │
+│   │         ├──► ToolNode (@tool-decorated functions)            │
 │   │         │     ├── web_search ──── Brave/Tavily API           │
 │   │         │     ├── code_exec ───── Docker sandbox             │
 │   │         │     └── calculator ─── inline Python eval          │
 │   │         │                                                    │
 │   │         └──► Memory Layer                                    │
-│   │               ├── Short-term: Redis (messages, TTL)         │
-│   │               └── Long-term: Pinecone (user facts)          │
+│   │               ├── MemorySaver/RedisSaver (thread_id)        │
+│   │               └── Pinecone (long-term semantic memory)      │
 │   │                                                              │
 │   ▼                                                              │
 │  Response ──── Streaming (SSE / WebSocket)                       │
@@ -48,44 +48,45 @@ export const systemDesigns: SystemDesign[] = [
           'Auth, rate limiting per user/tier, input validation (Pydantic guardrails), request logging.',
       },
       {
-        name: 'Agent Orchestrator',
+        name: 'LangGraph StateGraph',
         description:
-          'Manages the ReAct loop. Enforces max_steps=15, wall-clock timeout=60s, and detects stuck loops. Handles retry escalation.',
+          'create_react_agent() or custom StateGraph. Manages the ReAct loop (agent node ↔ ToolNode). recursion_limit enforces max_steps. MemorySaver checkpointer preserves state per thread_id.',
       },
       {
-        name: 'LLM Gateway',
+        name: 'Resilient LLM',
         description:
-          'Unified interface. Handles model fallback (Sonnet → Haiku), exponential backoff on rate limits, and token usage tracking.',
+          'ChatAnthropic with .with_retry(stop_after_attempt=3) + .with_fallbacks([fast_llm]). Replaces tenacity decorators and custom fallback chains. Works on any Runnable.',
       },
       {
-        name: 'Tool Registry',
+        name: 'ToolNode (@tool)',
         description:
-          'Centralized, versioned. Each tool has a schema, description, category, and access control tags. Agents discover tools dynamically.',
+          'Pre-built LangGraph node. Python functions decorated with @tool — docstrings become descriptions, signatures become JSON schemas. Replaces hand-written tool dispatch loops.',
       },
       {
         name: 'Memory Layer',
         description:
-          'Redis for in-flight conversation state (expires with session). Pinecone for long-term semantic memory retrieved on each turn.',
+          'MemorySaver (dev) or RedisSaver (prod) keyed by thread_id for conversation persistence. Pinecone for long-term semantic memory retrieved on each turn.',
       },
       {
         name: 'Observability',
         description:
-          'OpenTelemetry spans for every agent step. Send to Langfuse or Jaeger. Track: step number, tool, inputs, outputs, latency, tokens.',
+          'OpenTelemetry spans for every graph node. Send to Langfuse or Jaeger. Track: node name, inputs, outputs, latency, token counts.',
       },
     ],
     scaling: [
-      'Stateless orchestrator workers → horizontal scaling behind a load balancer (ECS/K8s)',
-      'Redis for all session state → any worker can handle any user request',
-      'Async parallel tool calls → run independent tools concurrently, not serially',
+      'Stateless StateGraph workers → horizontal scaling (MemorySaver → RedisSaver for multi-worker)',
+      'RedisSaver for all session state → any worker can handle any user request',
+      'Async parallel tool calls → ToolNode can execute tool_calls concurrently',
       'Embedding cache (Redis, TTL=1h) → avoid re-embedding the same documents',
       'Semantic response cache → return cached answer for repeated identical queries',
-      'LLM routing → simple queries to Haiku (fast/cheap), complex to Sonnet',
+      'LLM routing → simple queries to Haiku (.with_fallbacks()), complex to Sonnet',
       'Batch API for non-realtime tasks (10× cheaper than realtime)',
     ],
     keyDecisions: [
-      'Stateless workers: all state in Redis, not in process memory',
-      'LLM Gateway abstracts providers: swap models without touching agent code',
-      'Tool Registry with access control: tools can be restricted per user tier',
+      'StateGraph edges ARE the control flow: conditional edges replace if/elif routing code',
+      'MemorySaver thread_id = session identifier: one thread_id per conversation',
+      '.with_retry() + .with_fallbacks() on the LLM: composable resiliency without decorators',
+      'ToolNode replaces hand-written tool dispatch: add @tool, pass to ToolNode, done',
       'Streaming via SSE: return tokens as generated for better perceived latency',
     ],
   },
@@ -170,85 +171,84 @@ export const systemDesigns: SystemDesign[] = [
   },
   {
     id: 'multi-agent',
-    title: 'Multi-Agent Workflow',
+    title: 'Multi-Agent Workflow (LangGraph Supervisor)',
     subtitle:
       'Design a multi-agent system that can research a topic, analyze data, and write a report.',
     diagram: `┌─────────────────────────────────────────────────────────────────┐
-│                   MULTI-AGENT PIPELINE                           │
+│             MULTI-AGENT PIPELINE (LangGraph StateGraph)          │
 │                                                                   │
 │  User Task: "Research and report on X"                           │
 │       │                                                          │
 │       ▼                                                          │
 │  ┌──────────────┐                                                │
-│  │   PLANNER    │ ← Decomposes task into JSON step plan          │
-│  │  (Claude)    │   Each step: description + tool + expected     │
+│  │   PLANNER    │ ← .with_structured_output(TaskPlan)            │
+│  │   (node)     │   TypedDict state: plan, past_steps            │
 │  └──────┬───────┘                                                │
-│         │ Structured JSON Plan                                   │
+│         │ ── conditional edge ──────────────────────────────►    │
 │         ▼                                                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐           │
-│  │  RESEARCHER  │  │   ANALYZER   │  │    WRITER    │           │
-│  │ (web_search  │  │ (calculator  │  │ (synthesis)  │           │
-│  │  + RAG)      │  │  + code)     │  │              │           │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘           │
-│         │                 │                  │                   │
-│         └─────────────────┼──────────────────┘                   │
-│                     Step Results (JSON)                          │
-│                           │                                      │
+│  ┌──────────────┐  Command(goto="supervisor") from each          │
+│  │  SUPERVISOR  │ ◄──── researcher ──────────────────────────    │
+│  │   (node)     │ ◄──── analyzer ────────────────────────────    │
+│  │              │ ◄──── writer ──────────────────────────────    │
+│  └──────┬───────┘                                                │
+│   Command(goto=...)                                              │
+│         │                                                        │
+│                   ┌───────────────┐                              │
+│                   │   VALIDATOR   │ ← .with_structured_output()  │
+│                   │   (node)      │   conditional edge:          │
+│                   └───────┬───────┘   score<0.7 → executor       │
+│                           │           else → synthesizer         │
 │                   ┌───────┴───────┐                              │
-│                   │   VALIDATOR   │ ← Score 0-1 per step         │
-│                   │              │   < 0.7: retry execution      │
-│                   └───────┬───────┘   > 3 retries: human         │
-│                           │                                      │
-│                   ┌───────┴───────┐                              │
-│                   │  SYNTHESIZER  │ ← Final answer               │
+│                   │  SYNTHESIZER  │ ← LCEL chain → final answer  │
 │                   └───────────────┘                              │
 │                                                                   │
-│  Shared: Tool Registry ∙ Memory ∙ Observability ∙ Loop Control   │
+│  Shared: ToolNode ∙ MemorySaver ∙ Observability ∙ PlanExecuteState│
 └─────────────────────────────────────────────────────────────────┘`,
     components: [
       {
-        name: 'Planner',
+        name: 'Planner (node)',
         description:
-          'Receives the task and outputs a structured JSON plan (Pydantic-validated). Each step specifies: description, tool to use, and expected output.',
+          '.with_structured_output(TaskPlan) — no JSON extraction needed. Populates PlanExecuteState["plan"] with typed TaskStep objects.',
       },
       {
-        name: 'Researcher',
+        name: 'Supervisor (node)',
         description:
-          'Specialist agent for information gathering. Uses web_search and RAG retrieval. Passes results to the next step as structured context.',
+          'Routes tasks to specialists using Command(goto="researcher"|"analyzer"|"writer"). Command(goto=END) when done. Replaces hand-written if/elif routing.',
       },
       {
-        name: 'Analyzer',
+        name: 'Specialist nodes (researcher, analyzer, writer)',
         description:
-          'Specialist for computation: calculator, code execution, data processing. Receives research results as input context.',
+          'Each is a LangGraph node that does one thing. Returns Command(goto="supervisor") with updated messages. Uses ToolNode for tool execution.',
       },
       {
-        name: 'Writer',
+        name: 'Validator (node)',
         description:
-          'Synthesizes all prior results into a coherent output. No tool use — pure generation from accumulated context.',
+          '.with_structured_output(ValidationReport). Conditional edge: score < 0.7 → executor; max retries exceeded → synthesizer.',
       },
       {
-        name: 'Validator',
+        name: 'Synthesizer (node)',
         description:
-          'Quality gate: scores each step 0-1. Overall score < 0.7 → request re-execution. After 3 retries → flag for human review.',
+          'LCEL chain: prompt | llm | StrOutputParser(). Writes final answer to PlanExecuteState["response"]. Leads to END.',
       },
       {
-        name: 'Synthesizer',
+        name: 'MemorySaver checkpointer',
         description:
-          'Final agent that produces the user-facing answer by combining all validated step results. Applies formatting and structure.',
+          'Persists PlanExecuteState after every node. Crash mid-run? Resume from last checkpoint. Switch to RedisSaver for multi-worker deployments.',
       },
     ],
     scaling: [
-      'Parallelize independent plan steps (researcher + analyzer can run concurrently)',
-      'Stateless agents → each agent call is a separate, horizontally-scalable request',
-      'Event-driven: use SQS/Kafka to decouple steps — agents publish results, next agent subscribes',
-      'Validator as async sidecar: validate in parallel with synthesizer, only block on failures',
-      'Cost optimization: use Haiku for Planner/Validator; Sonnet only for Researcher/Writer',
+      'Parallelize independent plan steps: run researcher + analyzer as concurrent subgraphs',
+      'Stateless graph workers → RedisSaver for multi-worker session persistence',
+      'Event-driven: use SQS/Kafka to decouple graph invocations across services',
+      'Validator as conditional edge: only adds latency when score is below threshold',
+      'Cost optimization: use Haiku for Planner/Validator; Sonnet for Researcher/Writer',
     ],
     keyDecisions: [
-      'Orchestrator pattern (vs swarm): more predictable, easier to debug, explicit control flow',
-      'Structured JSON between agents: Pydantic-validated — no free-form hand-offs',
-      'Validator is the quality gate: prevents bad results from silently propagating',
-      'Shared observability: all agents emit to the same trace, giving a full picture of one run',
+      'Supervisor pattern with Command(goto=...): routing is declared in graph edges, not code',
+      '.with_structured_output() throughout: Pydantic-validated hand-offs, no JSON parsing',
+      'PlanExecuteState with operator.add on past_steps: results accumulate without overwriting',
+      'MemorySaver checkpointer: long-running tasks survive crashes without restarting from scratch',
+      'Conditional edges on validator: retry logic declared in the graph, not nested if/else',
     ],
   },
 ]
@@ -276,11 +276,12 @@ export const blankTemplate = {
     '[ ] Queue-based ingestion for non-realtime work',
   ],
   resiliency: [
-    '[ ] Retry with exponential backoff (tenacity, 3 attempts)',
-    '[ ] Model fallback chain (primary → cheaper fallback)',
-    '[ ] Max iterations + wall-clock timeout',
+    '[ ] Retry with exponential backoff (.with_retry(stop_after_attempt=3, wait_exponential_jitter=True))',
+    '[ ] Model fallback chain (.with_fallbacks([backup_llm]))',
+    '[ ] Max iterations via recursion_limit on the graph',
     '[ ] Input guardrails (sanitize, validate schema)',
-    '[ ] Output guardrails (validate response schema)',
-    '[ ] Human escalation path (confidence threshold)',
+    '[ ] Output guardrails (.with_structured_output() + Pydantic)',
+    '[ ] Human escalation via interrupt() + Command(resume=...)',
+    '[ ] Checkpointing (MemorySaver / RedisSaver) for crash recovery',
   ],
 }

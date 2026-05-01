@@ -1,6 +1,6 @@
 """
 Golden Dataset Evaluation Harness
-Runs the agent on a fixed set of question/answer pairs and scores performance.
+Runs the LLM on a fixed set of question/answer pairs and scores performance.
 
 Golden datasets are "ground truth" examples you maintain over time.
 They let you detect regressions: "did changing the prompt break anything?"
@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 _root = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").exists())
 sys.path.insert(0, str(_root))
 
-from core.client import get_client, FAST_MODEL
+from langchain_core.messages import HumanMessage
+from core.client import get_fast_llm, FAST_MODEL
 from core.models import EvalResult
 from core.logger import get_logger
 
@@ -32,9 +33,9 @@ log = get_logger(__name__)
 class GoldenExample:
     id: str
     question: str
-    expected_keywords: list[str]  # answer must contain at least N of these
+    expected_keywords: list[str]
     min_keyword_matches: int = 2
-    expected_exact: str | None = None  # for exact-match cases
+    expected_exact: str | None = None
     metadata: dict = field(default_factory=dict)
 
 
@@ -51,6 +52,12 @@ GOLDEN_DATASET: list[GoldenExample] = [
         id="react_pattern",
         question="What is the ReAct pattern in agentic AI?",
         expected_keywords=["reason", "act", "thought", "action", "observation", "tool", "loop"],
+        min_keyword_matches=3,
+    ),
+    GoldenExample(
+        id="langgraph_stategraph",
+        question="What is a LangGraph StateGraph and what does it replace?",
+        expected_keywords=["graph", "node", "edge", "state", "loop", "explicit"],
         min_keyword_matches=3,
     ),
     GoldenExample(
@@ -89,13 +96,18 @@ GOLDEN_DATASET: list[GoldenExample] = [
         expected_keywords=["validation", "input", "output", "safety", "schema", "sanitize", "prevent"],
         min_keyword_matches=2,
     ),
+    GoldenExample(
+        id="memorysaver",
+        question="What is LangGraph's MemorySaver and what does it enable?",
+        expected_keywords=["checkpoint", "thread", "state", "persist", "conversation", "session"],
+        min_keyword_matches=2,
+    ),
 ]
 
 
 # ── Evaluation functions ──────────────────────────────────────────────────────
 
 def keyword_score(answer: str, keywords: list[str], min_matches: int) -> tuple[bool, float]:
-    """Score by keyword coverage. Returns (passed, score)."""
     lower = answer.lower()
     matches = sum(1 for kw in keywords if kw.lower() in lower)
     score = matches / len(keywords)
@@ -103,7 +115,7 @@ def keyword_score(answer: str, keywords: list[str], min_matches: int) -> tuple[b
     return passed, score
 
 
-def llm_judge_score(question: str, answer: str, client) -> tuple[bool, float]:
+def llm_judge_score(question: str, answer: str, llm) -> tuple[bool, float]:
     """Use a second LLM call to judge the quality of the answer."""
     prompt = (
         f"Question: {question}\n"
@@ -115,13 +127,9 @@ def llm_judge_score(question: str, answer: str, client) -> tuple[bool, float]:
         " 1 = mostly wrong or missing key info\n\n"
         "Reply with ONLY a number from 0-10."
     )
-    response = client.messages.create(
-        model=FAST_MODEL,
-        max_tokens=5,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    response = llm.with_config({"max_tokens": 5}).invoke([HumanMessage(content=prompt)])
     try:
-        score = float(response.content[0].text.strip()) / 10.0
+        score = float(response.content.strip()) / 10.0
         return score >= 0.7, score
     except ValueError:
         return False, 0.0
@@ -132,26 +140,22 @@ def run_evaluation(
     use_llm_judge: bool = False,
     verbose: bool = True,
 ) -> list[EvalResult]:
-    client = get_client()
+    llm = get_fast_llm()
     results: list[EvalResult] = []
 
     if verbose:
         print(f"Running evaluation on {len(examples)} examples...\n")
 
     for ex in examples:
-        response = client.messages.create(
-            model=FAST_MODEL,
-            max_tokens=300,
-            messages=[{"role": "user", "content": ex.question}],
-        )
-        answer = response.content[0].text.strip()
+        response = llm.invoke([HumanMessage(content=ex.question)])
+        answer = response.content.strip()
 
         if ex.expected_exact:
             passed = ex.expected_exact.lower() in answer.lower()
             score = 1.0 if passed else 0.0
             notes = "exact match"
         elif use_llm_judge:
-            passed, score = llm_judge_score(ex.question, answer, client)
+            passed, score = llm_judge_score(ex.question, answer, llm)
             notes = "llm-judge"
         else:
             passed, score = keyword_score(answer, ex.expected_keywords, ex.min_keyword_matches)
@@ -203,7 +207,6 @@ if __name__ == "__main__":
     results = run_evaluation(GOLDEN_DATASET, use_llm_judge=False)
     print_summary(results)
 
-    # Export results
     output = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "model": FAST_MODEL,

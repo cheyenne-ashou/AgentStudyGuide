@@ -1,8 +1,11 @@
 """
-Plan-and-Execute Agent
-Two-phase approach:
-  Phase 1 (Plan): Ask Claude to produce a structured step-by-step plan
-  Phase 2 (Execute): Run each step in order, passing results forward
+Plan-and-Execute Agent (LangGraph StateGraph)
+Two-phase approach expressed as a multi-node graph:
+  planner_node:   Ask LLM to produce a structured step-by-step plan
+  executor_node:  Pop steps from the plan and execute them one by one
+  responder_node: Combine all results into a final answer
+
+Conditional edge: if plan is empty → respond; else → execute
 
 Why use this instead of pure ReAct?
   - Better for complex, long-horizon tasks (more than ~5 steps)
@@ -11,129 +14,163 @@ Why use this instead of pure ReAct?
   - Makes the agent's strategy visible and debuggable
   - Tradeoff: inflexible — can't adapt if mid-execution conditions change
 
+LangGraph concept: PlanExecuteState uses operator.add on past_steps so
+results accumulate across node invocations without overwriting.
+
 Run: python 02_agentic_core/patterns/plan_and_execute.py
 """
 import sys
-import json
 import math
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Literal
 
 _root = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").exists())
 sys.path.insert(0, str(_root))
 
-from core.client import get_client, MODEL, cached_system
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel
+from core.client import get_llm
+from core.models import PlanExecuteState
 
+
+# ── Pydantic models for structured planning ───────────────────────────────────
 
 class Step(BaseModel):
     step_number: int
     description: str
     tool: str | None = None
-    depends_on: list[int] = []
 
 
 class Plan(BaseModel):
     task: str
     steps: list[Step]
-    estimated_steps: int
 
 
 TOOLS_AVAILABLE = ["calculator", "web_search", "get_datetime", "none (answer directly)"]
 
 
-def phase1_plan(task: str, client) -> Plan:
-    """Ask Claude to make a structured plan."""
-    system = cached_system(
-        "You are a planning agent. When given a task, produce a JSON execution plan. "
-        "Be specific about which tool each step uses. "
-        f"Available tools: {', '.join(TOOLS_AVAILABLE)}"
-    )
-    schema = {
-        "task": "string",
-        "steps": [{"step_number": "int", "description": "string", "tool": "string|null", "depends_on": "[int]"}],
-        "estimated_steps": "int"
+# ── Tool definitions ──────────────────────────────────────────────────────────
+
+@tool
+def calculator(expression: str) -> str:
+    """Evaluate a mathematical expression."""
+    try:
+        result = eval(expression, {"__builtins__": {}}, vars(math))
+        return f"{expression} = {result}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool
+def get_datetime() -> str:
+    """Get the current UTC date and time."""
+    return datetime.now(timezone.utc).strftime("%A, %B %d %Y — %H:%M UTC")
+
+
+@tool
+def web_search(query: str) -> str:
+    """Search the web for current information."""
+    return f"[MOCK] Search results for '{query[:50]}': relevant information found"
+
+
+tools = [calculator, get_datetime, web_search]
+llm = get_llm()
+llm_with_tools = llm.bind_tools(tools)
+
+
+# ── Node functions ────────────────────────────────────────────────────────────
+
+def planner_node(state: PlanExecuteState) -> dict:
+    """Phase 1: generate a structured plan with .with_structured_output()."""
+    task = state["messages"][-1].content
+    print(f"\n[Planner] Decomposing task: {task[:80]}")
+
+    structured_llm = llm.with_structured_output(Plan)
+    plan_obj: Plan = structured_llm.invoke([
+        SystemMessage(content=(
+            f"You are a planning agent. Decompose the task into sequential steps. "
+            f"Available tools: {', '.join(TOOLS_AVAILABLE)}"
+        )),
+        HumanMessage(content=f"Task: {task}"),
+    ])
+
+    # Convert to list of plain strings for the state
+    step_list = [f"[{s.tool or 'direct'}] {s.description}" for s in plan_obj.steps]
+    print(f"  Plan ({len(step_list)} steps): {step_list}")
+    return {"plan": step_list}
+
+
+def executor_node(state: PlanExecuteState) -> dict:
+    """Phase 2: pop one step from the plan and execute it."""
+    current_step = state["plan"][0]
+    remaining = state["plan"][1:]
+    context = "\n".join(f"Previous: {r}" for r in state["past_steps"]) or "No prior context."
+
+    print(f"\n[Executor] Running: {current_step}")
+
+    response = llm_with_tools.invoke([
+        SystemMessage(content="Execute the given step. Use tools if specified."),
+        HumanMessage(content=f"Step: {current_step}\n\nContext:\n{context}"),
+    ])
+
+    # If the LLM called a tool, execute it
+    if response.tool_calls:
+        tool_node = ToolNode(tools)
+        tool_messages = tool_node.invoke([response])
+        result = tool_messages[0].content
+    else:
+        result = response.content
+
+    print(f"  Result: {str(result)[:100]}")
+    return {
+        "plan": remaining,
+        "past_steps": [(current_step, result)],
     }
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=1024,
-        system=system,
-        messages=[{
-            "role": "user",
-            "content": f"Task: {task}\n\nProduce a JSON plan following this schema:\n{json.dumps(schema, indent=2)}"
-        }],
-    )
-    text = response.content[0].text.strip()
-    # Extract JSON from response
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start == -1:
-        raise ValueError(f"No JSON found in response: {text[:200]}")
-    return Plan.model_validate_json(text[start:end])
 
 
-def execute_tool(tool: str, description: str, context: dict, client) -> str:
-    """Execute a single step, using LLM to derive tool inputs from the step description."""
-    if tool == "none (answer directly)" or tool is None:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=256,
-            messages=[{
-                "role": "user",
-                "content": f"Step: {description}\n\nContext from previous steps:\n{json.dumps(context, indent=2)}\n\nAnswer this step directly."
-            }],
-        )
-        return response.content[0].text.strip()
+def responder_node(state: PlanExecuteState) -> dict:
+    """Phase 3: synthesize all step results into a final answer."""
+    task = state["messages"][-1].content
+    steps_summary = "\n".join(f"  {step}: {result}" for step, result in state["past_steps"])
 
-    if tool == "calculator":
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=100,
-            messages=[{
-                "role": "user",
-                "content": f"Step: {description}\n\nContext: {json.dumps(context)}\n\nExtract the math expression to evaluate. Reply with ONLY the expression, nothing else."
-            }],
-        )
-        expr = response.content[0].text.strip().strip("`")
-        try:
-            result = eval(expr, {"__builtins__": {}}, vars(math))
-            return f"{expr} = {result}"
-        except Exception as e:
-            return f"Calculator error on '{expr}': {e}"
-
-    elif tool == "get_datetime":
-        return datetime.now(timezone.utc).strftime("%A, %B %d %Y — %H:%M UTC")
-
-    elif tool == "web_search":
-        return f"[MOCK] Search results for '{description[:50]}': relevant information found"
-
-    return f"Unknown tool: {tool}"
+    response = llm.invoke([
+        SystemMessage(content="Combine the execution results into a clear, complete answer."),
+        HumanMessage(content=f"Task: {task}\n\nResults:\n{steps_summary}\n\nAnswer:"),
+    ])
+    return {"response": response.content}
 
 
-def phase2_execute(plan: Plan, client) -> list[dict]:
-    """Execute each step in order, accumulating results."""
-    results = {}
+def route_after_plan(state: PlanExecuteState) -> Literal["execute", "respond"]:
+    """Route to executor if steps remain, or responder if done."""
+    return "execute" if state["plan"] else "respond"
 
-    print(f"\nExecuting {len(plan.steps)}-step plan...")
-    print("─" * 50)
 
-    for step in plan.steps:
-        print(f"\n[Step {step.step_number}] {step.description}")
-        print(f"  Tool: {step.tool or 'none'}")
-        if step.depends_on:
-            print(f"  Deps: {step.depends_on}")
+# ── Build the graph ───────────────────────────────────────────────────────────
 
-        context = {f"step_{k}": v for k, v in results.items() if k in step.depends_on}
-        result = execute_tool(step.tool or "none", step.description, context, client)
-        results[step.step_number] = result
-        print(f"  Result: {result[:100]}")
+def build_plan_execute_graph():
+    workflow = StateGraph(PlanExecuteState)
+    workflow.add_node("planner", planner_node)
+    workflow.add_node("executor", executor_node)
+    workflow.add_node("responder", responder_node)
 
-    return [{"step": k, "result": v} for k, v in results.items()]
+    workflow.set_entry_point("planner")
+    workflow.add_edge("planner", "executor")
+    workflow.add_conditional_edges("executor", route_after_plan, {
+        "execute": "executor",   # still steps remaining
+        "respond": "responder",  # plan exhausted
+    })
+    workflow.add_edge("responder", END)
+    return workflow.compile()
 
 
 if __name__ == "__main__":
-    print("=== PLAN-AND-EXECUTE AGENT DEMO ===")
-    client = get_client()
+    print("=== PLAN-AND-EXECUTE AGENT DEMO (LangGraph) ===")
 
     task = (
         "I want to save $50,000 for a house down payment. "
@@ -141,25 +178,25 @@ if __name__ == "__main__":
         "and also what day of the week is today."
     )
 
-    print(f"\nTask: {task}")
-    print("\n=== PHASE 1: PLANNING ===")
+    agent = build_plan_execute_graph()
+    result = agent.invoke({"messages": [HumanMessage(content=task)], "plan": [], "past_steps": [], "response": None})
 
-    plan = phase1_plan(task, client)
-    print(f"\nPlan produced: {len(plan.steps)} steps")
-    for step in plan.steps:
-        deps = f" [depends on steps {step.depends_on}]" if step.depends_on else ""
-        print(f"  Step {step.step_number}: [{step.tool or 'direct'}] {step.description}{deps}")
+    print(f"\n{'='*60}")
+    print(f"FINAL ANSWER:\n{result['response']}")
 
-    print("\n=== PHASE 2: EXECUTION ===")
-    results = phase2_execute(plan, client)
+    print("\n--- Graph Structure ---")
+    print("  planner → executor (loop until plan empty) → responder → END")
+    print("  Conditional edge on executor: plan empty? → responder : → executor")
 
-    print("\n=== RESULTS SUMMARY ===")
-    for r in results:
-        print(f"  Step {r['step']}: {r['result'][:100]}")
+    print("\n--- PlanExecuteState keys ---")
+    print("  messages:    incoming task + accumulated messages")
+    print("  plan:        remaining steps (shrinks each executor invocation)")
+    print("  past_steps:  completed (step, result) pairs (grows via operator.add)")
+    print("  response:    final answer (set by responder)")
 
     print("\n--- When to Use Plan-and-Execute ---")
     print("  ✓ Long-horizon tasks (>5 steps)")
     print("  ✓ Tasks where the plan can be reviewed before running")
-    print("  ✓ Tasks with parallelizable steps (search + calculate in parallel)")
+    print("  ✓ Tasks with parallelizable steps")
     print("  ✗ Tasks that need adaptive mid-execution course corrections")
     print("  ✗ Short tasks (overhead not worth it)")

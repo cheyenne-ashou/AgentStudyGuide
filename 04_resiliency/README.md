@@ -26,9 +26,9 @@ Most interview candidates fail resiliency questions. This section covers all of 
 | File | Pattern | Interview question it answers |
 |---|---|---|
 | `guardrails.py` | Input/output validation | "How do you prevent bad inputs/outputs?" |
-| `retry_strategies.py` | Exponential backoff + fallback | "What happens when an API call fails?" |
+| `retry_strategies.py` | `.with_retry()` + `.with_fallbacks()` | "What happens when an API call fails?" |
 | `loop_control.py` | Max iterations, timeout | "How do you prevent infinite loops?" |
-| `structured_outputs.py` | JSON enforcement | "How do you make LLM output reliable?" |
+| `structured_outputs.py` | `.with_structured_output()` | "How do you make LLM output reliable?" |
 | `evaluation/prompt_unit_tests.py` | Prompt testing | "How do you test an agent?" |
 | `evaluation/golden_dataset.py` | Golden dataset eval | "How do you measure agent quality?" |
 

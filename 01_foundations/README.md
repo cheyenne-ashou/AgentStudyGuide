@@ -6,9 +6,9 @@ Core concepts every agentic AI engineer must know cold.
 
 | File | Concept | API needed? |
 |---|---|---|
-| `prompting_strategies.py` | zero-shot / few-shot / CoT / ReAct | Yes |
-| `temperature_demo.py` | stochastic vs deterministic output | Yes |
-| `hallucination_demo.py` | why hallucinations happen + 3 mitigations | Yes |
+| `prompting_strategies.py` | zero-shot / few-shot / CoT / ReAct as LCEL chains | Yes |
+| `temperature_demo.py` | ChatAnthropic(temperature=...) | Yes |
+| `hallucination_demo.py` | mitigations as LCEL chains, RAG preview | Yes |
 
 **Key interview question:** *"Why do LLMs hallucinate and how do you reduce it?"*
 

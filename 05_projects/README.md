@@ -6,9 +6,9 @@ Three capstone projects that compose everything from sections 1–4.
 
 | Project | Concepts | Time |
 |---|---|---|
-| Project 1: Tool Agent | ReAct loop, tool calling, retries, logging | ~30 min |
-| Project 2: RAG System | Hybrid search, FastAPI, chunking | ~1 hour |
-| Project 3: Multi-Agent | Plan+execute, validation, orchestration | ~1.5 hours |
+| Project 1: Tool Agent | `create_react_agent()`, `@tool`, `MemorySaver`, `.with_retry()` | ~30 min |
+| Project 2: RAG System | LCEL chain, `RunnableLambda`, hybrid search, FastAPI | ~1 hour |
+| Project 3: Multi-Agent | `PlanExecuteState`, `.with_structured_output()`, supervisor pattern | ~1.5 hours |
 
 ## Study Order
 
@@ -39,6 +39,6 @@ Planner → Executor → Validator pipeline. The most complex pattern you'll enc
 ## Interview Impact
 
 These projects give you concrete answers to "walk me through something you built":
-- "I built a RAG system with hybrid BM25+vector search and RRF re-ranking..."
-- "I implemented a multi-agent pipeline where a validator agent quality-gates results..."
-- "I designed a tool-using agent with exponential backoff and max iteration limits..."
+- "I built a RAG system as an LCEL chain: retriever | prompt | llm | parser, with hybrid BM25+vector search..."
+- "I implemented a multi-agent StateGraph with a validator node that conditionally retries execution..."
+- "I built a tool-using agent with create_react_agent(), MemorySaver for persistence, and .with_retry() for resilience..."

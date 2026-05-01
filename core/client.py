@@ -1,13 +1,13 @@
 """
-Anthropic client singleton with prompt caching enabled by default.
+LangChain/LangGraph client setup.
 
 Usage:
-    from core.client import get_client, MODEL, FAST_MODEL, cached_system
-    client = get_client()
-    response = client.messages.create(model=MODEL, ...)
+    from core.client import get_llm, get_fast_llm, MODEL, FAST_MODEL
+    llm = get_llm()
+    response = llm.invoke([HumanMessage(content="Hello")])
 """
 import os
-from anthropic import Anthropic
+from langchain_anthropic import ChatAnthropic
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,25 +16,36 @@ load_dotenv()
 MODEL = "claude-sonnet-4-6"
 FAST_MODEL = "claude-haiku-4-5-20251001"
 
-_client: Anthropic | None = None
+_llm: ChatAnthropic | None = None
+_fast_llm: ChatAnthropic | None = None
 
 
-def get_client() -> Anthropic:
-    global _client
-    if _client is None:
+def get_llm(temperature: float = 0.0) -> ChatAnthropic:
+    """Return a singleton ChatAnthropic instance for the primary model."""
+    global _llm
+    if _llm is None:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise EnvironmentError(
                 "ANTHROPIC_API_KEY not set. Copy .env.example to .env and add your key."
             )
-        _client = Anthropic(api_key=api_key)
-    return _client
+        _llm = ChatAnthropic(model=MODEL, temperature=temperature, api_key=api_key)
+    return _llm
 
 
-def cached_system(text: str) -> list[dict]:
-    """Wrap a system prompt with cache_control for prompt caching (5-min TTL).
+def get_fast_llm(temperature: float = 0.7) -> ChatAnthropic:
+    """Return a singleton ChatAnthropic instance for the fast/cheap model."""
+    global _fast_llm
+    if _fast_llm is None:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise EnvironmentError(
+                "ANTHROPIC_API_KEY not set. Copy .env.example to .env and add your key."
+            )
+        _fast_llm = ChatAnthropic(model=FAST_MODEL, temperature=temperature, api_key=api_key)
+    return _fast_llm
 
-    Reduces latency and cost when the same system prompt is reused across turns.
-    Use on any system prompt longer than ~1000 tokens.
-    """
-    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
+# Backwards-compatible alias — prefer get_llm() in new code
+def get_client() -> ChatAnthropic:
+    return get_llm()

@@ -1,105 +1,37 @@
 """
-Retry Strategies with Exponential Backoff
-Uses `tenacity` for retrying failed LLM/tool calls.
+Retry Strategies with LangGraph Runnables
+Uses .with_retry() and .with_fallbacks() instead of the tenacity decorator pattern.
 
 Three patterns:
-  1. Simple retry — retry N times on any error
-  2. Exponential backoff — wait longer between each retry
-  3. Model fallback — if primary model fails repeatedly, use a backup
+  1. .with_retry()     — retry N times with exponential backoff and jitter
+  2. .with_fallbacks() — switch to a backup model on failure
+  3. Combined          — retry, then fall back (recommended for production)
 
 In agentic systems, you MUST have retries. External APIs fail.
-LLMs return rate limit errors. Networks are unreliable.
-The question is: how long do you wait before giving up?
+LLMs return transient errors. Networks are unreliable.
+LangGraph Runnables handle this composably — no decorator imports needed.
+
+The plain Python retry loop below (Demo 1) still teaches the concept,
+but for LLM calls, always prefer .with_retry() — it integrates with
+the Runnable interface and applies to chains, retrievers, and tool nodes.
 
 Run: python 04_resiliency/retry_strategies.py
 """
 import sys
 import time
-import random
 from pathlib import Path
-from typing import Callable, Any
 
 _root = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").exists())
 sys.path.insert(0, str(_root))
 
-import anthropic
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    wait_random_exponential,
-    retry_if_exception_type,
-    before_sleep_log,
-    RetryError,
-)
-from core.client import get_client, MODEL, FAST_MODEL
+from langchain_core.messages import HumanMessage
+from core.client import get_llm, get_fast_llm, MODEL, FAST_MODEL
 from core.logger import get_logger
 
 log = get_logger(__name__)
 
 
-# ── 1. Simple exponential backoff decorator ───────────────────────────────────
-
-@retry(
-    retry=retry_if_exception_type(anthropic.RateLimitError),
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=2, max=30),
-    before_sleep=before_sleep_log(log, "warning"),  # type: ignore
-)
-def llm_call_with_backoff(messages: list[dict], model: str = MODEL, max_tokens: int = 200) -> str:
-    """Any RateLimitError will be retried with exponential backoff."""
-    client = get_client()
-    response = client.messages.create(model=model, max_tokens=max_tokens, messages=messages)
-    return response.content[0].text.strip()
-
-
-# ── 2. Jittered backoff (better for distributed systems) ─────────────────────
-
-@retry(
-    retry=retry_if_exception_type(anthropic.RateLimitError),
-    stop=stop_after_attempt(4),
-    wait=wait_random_exponential(multiplier=1, min=1, max=20),  # adds jitter
-)
-def llm_call_with_jitter(messages: list[dict], model: str = MODEL) -> str:
-    """Jittered backoff prevents thundering herd when many clients retry simultaneously."""
-    client = get_client()
-    response = client.messages.create(model=model, max_tokens=200, messages=messages)
-    return response.content[0].text.strip()
-
-
-# ── 3. Model fallback chain ───────────────────────────────────────────────────
-
-class ModelFallbackChain:
-    """
-    Try models in order. On failure, move to next.
-    Useful for: cost optimization (use cheap model when expensive one fails),
-    or resilience (keep serving even if one model is down).
-    """
-
-    def __init__(self, models: list[str]):
-        self._models = models
-        self._client = get_client()
-
-    def complete(self, messages: list[dict], max_tokens: int = 200) -> tuple[str, str]:
-        """Returns (text, model_used)."""
-        last_error = None
-        for model in self._models:
-            try:
-                response = self._client.messages.create(
-                    model=model, max_tokens=max_tokens, messages=messages
-                )
-                return response.content[0].text.strip(), model
-            except anthropic.RateLimitError as e:
-                log.warning("fallback.rate_limit", model=model)
-                last_error = e
-                time.sleep(1)
-            except anthropic.APIStatusError as e:
-                log.warning("fallback.api_error", model=model, status=e.status_code)
-                last_error = e
-        raise RuntimeError(f"All models failed. Last: {last_error}")
-
-
-# ── 4. Simulated failure for demo ─────────────────────────────────────────────
+# ── 1. Plain Python retry loop (teaches the concept) ─────────────────────────
 
 _call_count = 0
 
@@ -109,59 +41,109 @@ def flaky_api_call(succeed_on_attempt: int = 3) -> str:
     _call_count += 1
     print(f"  [Attempt {_call_count}]", end=" ")
     if _call_count < succeed_on_attempt:
-        print(f"FAIL (simulated)")
+        print("FAIL (simulated)")
         raise ConnectionError(f"Simulated API failure on attempt {_call_count}")
-    print(f"SUCCESS")
+    print("SUCCESS")
     return "API response: data successfully retrieved"
 
 
-@retry(
-    retry=retry_if_exception_type(ConnectionError),
-    stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=0.5, min=0.1, max=2),
-)
-def resilient_api_call() -> str:
-    return flaky_api_call(succeed_on_attempt=3)
+def retry_with_backoff(fn, max_attempts: int = 5, base_delay: float = 0.1) -> str:
+    """Manual exponential backoff — shows the pattern before using .with_retry()."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except ConnectionError as e:
+            if attempt == max_attempts:
+                raise
+            wait = base_delay * (2 ** (attempt - 1))
+            print(f"    Waiting {wait:.1f}s before retry...")
+            time.sleep(wait)
+    raise RuntimeError("Unreachable")
+
+
+# ── 2. LangGraph .with_retry() ───────────────────────────────────────────────
+
+def demo_with_retry() -> None:
+    """
+    .with_retry() wraps the LLM as a Runnable with built-in backoff.
+    Replaces: @retry(retry_if_exception_type(RateLimitError), stop_after_attempt(4), ...)
+    """
+    print("--- Pattern 2: .with_retry() ---")
+    llm = get_fast_llm().with_retry(
+        stop_after_attempt=3,
+        wait_exponential_jitter=True,  # jitter prevents thundering herd
+    )
+    result = llm.invoke([HumanMessage(content="In one sentence: what is exponential backoff?")])
+    print(f"  Response: {result.content}")
+    print("  If a transient error occurs, .with_retry() retries up to 3× automatically.")
+
+
+# ── 3. .with_fallbacks() ─────────────────────────────────────────────────────
+
+def demo_with_fallbacks() -> None:
+    """
+    .with_fallbacks() switches to a backup model if the primary exhausts retries.
+    Replaces: hand-written ModelFallbackChain class.
+    """
+    print("\n--- Pattern 3: .with_fallbacks() ---")
+    llm = get_llm().with_fallbacks(
+        [get_fast_llm()],
+        exceptions_to_handle=(Exception,),
+    )
+    result = llm.invoke([HumanMessage(content="In one sentence: why use a model fallback chain?")])
+    print(f"  Response: {result.content}")
+    print(f"  Chain: {MODEL} → {FAST_MODEL} (on failure)")
+
+
+# ── 4. Combined: retry + fallback ─────────────────────────────────────────────
+
+def demo_combined() -> None:
+    """
+    The recommended production pattern: retry primary, then fall back.
+    The fallback model itself can also have retries.
+    """
+    print("\n--- Pattern 4: Combined retry + fallback (production) ---")
+    resilient_llm = (
+        get_llm()
+        .with_retry(stop_after_attempt=3, wait_exponential_jitter=True)
+        .with_fallbacks(
+            [get_fast_llm().with_retry(stop_after_attempt=2)],
+            exceptions_to_handle=(Exception,),
+        )
+    )
+    result = resilient_llm.invoke(
+        [HumanMessage(content="In one sentence: when should you NOT retry a failed API call?")]
+    )
+    print(f"  Response: {result.content}")
+    print("  Behavior: retry primary 3×, then retry fallback 2×, then raise")
 
 
 if __name__ == "__main__":
-    print("=== RETRY STRATEGIES DEMO ===\n")
+    print("=== RETRY STRATEGIES DEMO (LangGraph) ===\n")
 
-    # ── Demo 1: Simulated flaky API ──────────────────────────────────────────
-    print("--- Demo 1: Exponential Backoff on Flaky API ---")
+    # ── Demo 1: Plain Python backoff (teaches the concept) ───────────────────
+    print("--- Demo 1: Manual Exponential Backoff (conceptual) ---")
     print("API will fail 2 times before succeeding on attempt 3:\n")
     _call_count = 0
-    try:
-        result = resilient_api_call()
-        print(f"\nFinal result: {result}")
-    except RetryError:
-        print("\nAll retries exhausted!")
+    result = retry_with_backoff(lambda: flaky_api_call(succeed_on_attempt=3))
+    print(f"\nFinal result: {result}")
 
-    # ── Demo 2: Model fallback chain ─────────────────────────────────────────
-    print("\n--- Demo 2: Model Fallback Chain ---")
-    chain = ModelFallbackChain(models=[MODEL, FAST_MODEL])
-    print(f"Chain: {' → '.join(chain._models)}")
-
-    text, used_model = chain.complete(
-        messages=[{"role": "user", "content": "In one sentence: what is exponential backoff?"}]
-    )
-    print(f"Used model: {used_model}")
-    print(f"Response: {text}")
-
-    # ── Demo 3: Real LLM call with backoff ───────────────────────────────────
-    print("\n--- Demo 3: Real LLM Call with Backoff ---")
-    result = llm_call_with_backoff(
-        messages=[{"role": "user", "content": "In one sentence: when should you NOT retry a failed call?"}]
-    )
-    print(f"Response: {result}")
+    # ── Demo 2-4: LangGraph Runnable patterns ────────────────────────────────
+    demo_with_retry()
+    demo_with_fallbacks()
+    demo_combined()
 
     # ── Backoff schedule ─────────────────────────────────────────────────────
     print("\n--- Exponential Backoff Schedule ---")
     print("  Attempt 1: fail → wait 2s")
     print("  Attempt 2: fail → wait 4s")
     print("  Attempt 3: fail → wait 8s")
-    print("  Attempt 4: fail → wait 16s (capped at max)")
     print("  With jitter: wait(n) = 2^n * random(0.5, 1.5)  ← prevents thundering herd")
+
+    print("\n--- .with_retry() vs tenacity @retry ---")
+    print("  Old: @retry(retry_if_exception_type(anthropic.RateLimitError), stop_after_attempt(4))")
+    print("  New: llm.with_retry(stop_after_attempt=3, wait_exponential_jitter=True)")
+    print("       Works on any Runnable: LLMs, chains, retrievers, ToolNode")
 
     print("\n--- When NOT to Retry ---")
     print("  400 Bad Request → your input is wrong, retrying won't help")

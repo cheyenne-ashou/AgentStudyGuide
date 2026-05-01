@@ -1,6 +1,14 @@
 """
-Project 2: RAG System — Full Query Pipeline
+Project 2: RAG System — Full Query Pipeline (LCEL)
 Retrieves relevant chunks → builds augmented prompt → generates grounded answer.
+
+Pipeline: retriever | format_context | prompt | llm | parser
+
+The LCEL (LangChain Expression Language) chain composes the three RAG phases
+as Runnables connected by the | operator:
+  1. Retrieve:  RunnableLambda(hybrid_search) → list of chunks
+  2. Augment:   format_context + ChatPromptTemplate → augmented prompt
+  3. Generate:  ChatAnthropic | StrOutputParser → grounded answer
 
 Run: python 05_projects/project2_rag/rag_chain.py
 (requires running ingest.py first)
@@ -12,8 +20,11 @@ _root = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml
 sys.path.insert(0, str(_root))
 sys.path.insert(0, str(Path(__file__).parent))
 
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from retrieval import hybrid_search
-from core.client import get_client, MODEL, cached_system
+from core.client import get_llm
 from core.logger import get_logger
 
 log = get_logger(__name__)
@@ -33,37 +44,53 @@ def format_context(retrieved: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def build_rag_chain(top_k: int = 4):
+    """
+    Build the LCEL RAG chain.
+
+    The chain structure:
+      {
+        "context": retriever | format_context,  ← Step 1+2: retrieve & format
+        "question": RunnablePassthrough()        ← pass the question through
+      }
+      | prompt_template                          ← Step 2: augment
+      | llm                                      ← Step 3: generate
+      | StrOutputParser()                        ← extract string from AIMessage
+    """
+    retriever = RunnableLambda(lambda q: hybrid_search(q, top_k=top_k))
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", RAG_SYSTEM),
+        ("human", "Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"),
+    ])
+
+    return (
+        {"context": retriever | format_context, "question": RunnablePassthrough()}
+        | prompt
+        | get_llm()
+        | StrOutputParser()
+    )
+
+
 def rag_query(question: str, top_k: int = 4, verbose: bool = True) -> dict:
     """
-    Full RAG pipeline:
-      1. Retrieve: hybrid search for relevant chunks
-      2. Augment: build prompt with context
-      3. Generate: call Claude with grounded prompt
+    Full RAG pipeline via LCEL chain.
+    Returns answer dict with sources and metadata.
     """
     if verbose:
         print(f"\nQ: {question}")
         print("─" * 60)
 
-    # Step 1: Retrieve
+    # Step 1: Retrieve (for logging — the chain does this internally too)
     retrieved = hybrid_search(question, top_k=top_k)
     if verbose:
         print(f"Retrieved {len(retrieved)} chunks:")
         for r in retrieved:
             print(f"  [{r['source']}] rrf={r['rrf_score']:.4f}  {r['text'][:60]}...")
 
-    # Step 2: Augment
-    context = format_context(retrieved)
-    prompt = f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
-
-    # Step 3: Generate
-    client = get_client()
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=512,
-        system=cached_system(RAG_SYSTEM),
-        messages=[{"role": "user", "content": prompt}],
-    )
-    answer = response.content[0].text.strip()
+    # Step 2+3: Augment + Generate via LCEL chain
+    chain = build_rag_chain(top_k=top_k)
+    answer = chain.invoke(question)
 
     sources = list({r["source"] for r in retrieved})
     log.info(
@@ -71,7 +98,6 @@ def rag_query(question: str, top_k: int = 4, verbose: bool = True) -> dict:
         question=question[:50],
         chunks=len(retrieved),
         sources=sources,
-        tokens=response.usage.input_tokens + response.usage.output_tokens,
     )
 
     if verbose:
@@ -83,12 +109,11 @@ def rag_query(question: str, top_k: int = 4, verbose: bool = True) -> dict:
         "answer": answer,
         "sources": sources,
         "retrieved_chunks": len(retrieved),
-        "tokens_used": response.usage.input_tokens + response.usage.output_tokens,
     }
 
 
 if __name__ == "__main__":
-    print("=== RAG QUERY DEMO ===")
+    print("=== RAG QUERY DEMO (LCEL Chain) ===")
     print("(Run ingest.py first if you haven't)\n")
 
     questions = [
@@ -102,9 +127,18 @@ if __name__ == "__main__":
         result = rag_query(q)
         print(f"\n{'='*60}")
 
-    print("\n--- RAG Pipeline Summary ---")
+    print("\n--- LCEL RAG Chain Pattern ---")
+    print("  chain = (")
+    print("      {\"context\": retriever | format_context, \"question\": RunnablePassthrough()}")
+    print("      | ChatPromptTemplate.from_messages([...])")
+    print("      | get_llm()")
+    print("      | StrOutputParser()")
+    print("  )")
+    print("  answer = chain.invoke(question)")
+
+    print("\n--- Three-Phase RAG Summary ---")
     print("1. Retrieve: hybrid BM25 + vector search → top-k chunks")
-    print("2. Augment:  inject chunks as context into prompt")
-    print("3. Generate: Claude answers based ONLY on provided context")
+    print("2. Augment:  inject chunks as context via ChatPromptTemplate")
+    print("3. Generate: LLM answers based ONLY on provided context")
     print("\nKey advantage: answer is grounded in real documents → fewer hallucinations")
     print("Key limitation: answer quality depends on retrieval quality (GIGO)")

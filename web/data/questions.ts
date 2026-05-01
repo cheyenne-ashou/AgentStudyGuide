@@ -29,7 +29,7 @@ The four key properties:
 - **State** — it maintains context across multiple steps
 - **Stopping condition** — it knows when it's done
 
-The canonical loop is the **ReAct pattern**: Thought → Action → Observation → repeat.`,
+The canonical loop is the **ReAct pattern**: Thought → Action → Observation → repeat. In LangGraph, this is a StateGraph with an \`agent\` node, a \`ToolNode\`, and a conditional edge: if the last message has tool_calls → go to tools; else → END.`,
   },
   {
     id: 'rag-end-to-end',
@@ -210,7 +210,7 @@ All state must live in external storage — not in process memory.
     question: 'How do you handle failures in a long-running agent?',
     answer: `**Layered defenses:**
 
-1. **Retry with backoff** — \`@retry(stop=stop_after_attempt(3), wait=wait_exponential(...))\` on every LLM and tool call. Never retry immediately.
+1. **Retry with backoff** — \`llm.with_retry(stop_after_attempt=3, wait_exponential_jitter=True)\` on every LLM call. \`.with_fallbacks([backup_llm])\` for model-level fallback. Never retry immediately.
 
 2. **Loop control** — \`max_steps=15\`, timeout=60s, stuck-loop detection (same action 3× in a row → break).
 
@@ -222,7 +222,7 @@ All state must live in external storage — not in process memory.
 
 6. **Human escalation** — if confidence < 0.5 after retries, route to a human review queue rather than returning a bad answer.
 
-7. **Checkpointing** — for tasks > 60s, save progress to a DB so the agent can resume after crashes rather than restart.
+7. **Checkpointing** — LangGraph's MemorySaver (dev) or SqliteSaver/RedisSaver (prod) persist graph state after every node. A crash mid-run resumes from the last checkpoint rather than restarting.
 
 **Key principle:** always have a fallback. Every component must have an "I failed" path that degrades gracefully, not catastrophically.`,
   },
@@ -281,21 +281,24 @@ Run the full agent in a sandboxed environment against realistic scenarios.
     category: 'practical',
     tags: ['frameworks', 'langchain', 'langgraph'],
     question: "What's the difference between LangChain and LangGraph?",
-    answer: `**LangChain** provides composable building blocks: chains, retrievers, tools, memory modules. You wire them together into pipelines. Great for simple linear workflows (retrieve → augment → generate) and RAG chains.
+    answer: `**LangChain** provides composable building blocks: ChatModels, prompts, chains (LCEL |), retrievers, and tool abstractions. Great for linear pipelines: \`retriever | prompt | llm | parser\`.
 
-**LangGraph** (built on LangChain) models agent workflows as a **state machine graph**. Each node is a processing step; edges are conditional transitions.
+**LangGraph** (built on LangChain) models agent workflows as a **StateGraph** — a directed graph where nodes are Python functions that read/update shared TypedDict state.
 
-**Why LangGraph matters:**
-- Explicit loops — define "if tool_use, go to executor node; else, go to response node"
-- Conditional edges — "if validation score < 0.7, go back to executor"
-- Multi-agent — each agent is a node; coordination is explicit in the graph definition
-- Persistence — built-in checkpointing for long-running workflows
+**Core LangGraph primitives:**
+- \`StateGraph(AgentState)\` — declare nodes and edges explicitly
+- \`ToolNode\` — pre-built executor for @tool-decorated functions
+- \`create_react_agent()\` — builds the standard ReAct graph in one call
+- \`MemorySaver\` — persists state by thread_id across invocations
+- \`interrupt()\` + \`Command(resume=...)\` — human-in-the-loop natively
+- \`Command(goto=...)\` — dynamic routing in supervisor patterns
+- \`.with_retry()\` / \`.with_fallbacks()\` — composable resiliency on any Runnable
 
 **When to use which:**
-- LangChain: RAG pipelines, simple tool-use chains, quick prototypes
-- LangGraph: multi-step agents with loops, multi-agent workflows, production systems needing explicit control flow
+- LangChain LCEL: RAG pipelines, simple tool-use chains, linear prompting
+- LangGraph: multi-step agents with loops, multi-agent workflows, human-in-the-loop, production systems needing state persistence
 
-**Interview tip:** saying "I'd use LangGraph for anything with conditional logic or loops" shows you understand the framework landscape.`,
+**Interview tip:** "LangGraph for anything with conditional logic, loops, or multi-agent coordination; LCEL chains for linear pipelines."`,
   },
   {
     id: 'stateless-vs-stateful',
@@ -342,13 +345,19 @@ After each action, it observes the result and reasons again. The loop continues 
 - It gives you visibility into *why* the agent took each action (the thought before the tool call)
 - All major frameworks implement a variation: LangChain's AgentExecutor, LangGraph's tool-calling nodes, AutoGen's conversational agents
 
-**Anatomy of one loop iteration:**
+**Anatomy of one loop iteration (LangGraph StateGraph):**
 \`\`\`
-1. messages → Claude API
-2. Claude returns: text block (thought) + tool_use block (action)
-3. Your code: execute tool → get result
-4. Append tool_result to messages
-5. Go to step 1 (unless stop_reason == "end_turn")
+1. call_model node: llm.invoke(state["messages"]) → AIMessage
+2. should_continue edge: if response.tool_calls → "tools" else END
+3. ToolNode: execute each tool call → ToolMessages
+4. Edge back to call_model: repeat
+5. On END: state["messages"][-1].content is the final answer
+\`\`\`
+
+**LangGraph shorthand:**
+\`\`\`python
+agent = create_react_agent(get_llm(), tools=[calculator, web_search])
+result = agent.invoke({"messages": [HumanMessage(content="What is 25 * 47?")]})
 \`\`\``,
   },
   {
@@ -369,5 +378,66 @@ After each action, it observes the result and reasons again. The loop continues 
 **Evaluation infrastructure:** regression testing pipelines with golden datasets, A/B testing prompt variants with statistical significance testing, LLM-as-judge at scale with calibration.
 
 **Cost optimization:** prompt caching for long system prompts, batch API for non-realtime workloads, context compression before expensive synthesis calls.`,
+  },
+  {
+    id: 'create-react-agent-vs-custom-graph',
+    category: 'practical',
+    tags: ['langgraph', 'patterns', 'architecture'],
+    question: 'When do you use create_react_agent() vs. a custom StateGraph?',
+    answer: `**create_react_agent()** is the right default. It builds the standard ReAct loop (agent node + ToolNode + conditional edge) in one call. Use it when:
+- You have a list of tools and a simple task
+- You want persistence via MemorySaver with no extra logic
+- You're prototyping — it's easy to swap in a custom graph later
+
+\`\`\`python
+agent = create_react_agent(get_llm(), tools=[calculator, web_search], checkpointer=MemorySaver())
+\`\`\`
+
+**Build a custom StateGraph** when you need:
+- **Conditional branching** — "if validation score < 0.7, go back to executor"
+- **Multi-agent coordination** — supervisor with Command(goto=...) routing to specialists
+- **Custom state** — fields beyond just messages (e.g., plan, past_steps, retry_count)
+- **Human-in-the-loop** — interrupt() nodes at specific decision points
+- **Non-standard loops** — plan-and-execute, critic-revise, debate patterns
+
+**Rule of thumb:** start with create_react_agent(). Migrate to an explicit StateGraph the moment you need to add conditional logic or custom state.`,
+  },
+  {
+    id: 'langgraph-stategraph-vs-react-loop',
+    category: 'conceptual',
+    tags: ['langgraph', 'react', 'fundamentals'],
+    question: 'How does LangGraph\'s StateGraph differ from a hand-written ReAct loop?',
+    answer: `**Same logic, different structure.** A StateGraph is a ReAct loop declared as a graph instead of coded as a while loop.
+
+**Hand-written loop:**
+\`\`\`python
+while step < max_steps:
+    response = client.messages.create(tools=TOOLS, messages=messages)
+    if response.stop_reason == "end_turn":
+        return response.content[0].text
+    for block in response.content:
+        if block.type == "tool_use":
+            result = execute_tool(block.name, block.input)
+            tool_results.append({"type": "tool_result", ...})
+    messages.append({"role": "assistant", "content": response.content})
+    messages.append({"role": "user", "content": tool_results})
+\`\`\`
+
+**LangGraph StateGraph (same logic):**
+\`\`\`python
+workflow = StateGraph(AgentState)
+workflow.add_node("agent", call_model)     # ← was: client.messages.create()
+workflow.add_node("tools", ToolNode(tools)) # ← was: the for block in response.content loop
+workflow.add_conditional_edges("agent", should_continue)  # ← was: if stop_reason == "end_turn"
+workflow.add_edge("tools", "agent")        # ← was: messages.append(...); continue
+agent = workflow.compile()
+\`\`\`
+
+**What you gain with StateGraph:**
+- Control flow is explicit and inspectable (print the graph)
+- Checkpointing is built in — add MemorySaver for free state persistence
+- Human-in-the-loop via interrupt() — impossible in a while loop without blocking
+- Multi-agent coordination via Command(goto=...) — routing is declared, not coded
+- Easier to test individual nodes in isolation`,
   },
 ]

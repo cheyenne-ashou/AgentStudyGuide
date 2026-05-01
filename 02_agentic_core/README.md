@@ -10,17 +10,18 @@ sample_tools.py     → concrete tools: calculator, datetime, mock search
 function_calling.py → end-to-end Claude tool_use block demo
 ```
 
-**Key interview question:** *"How does function calling work?"*
+**Key interview question:** *"How does function calling work in LangGraph?"*
 
-1. Define tools as JSON schemas in the API request
-2. Model returns a `tool_use` content block instead of text
-3. Your code executes the tool and returns a `tool_result`
-4. Model receives the result and continues reasoning
+1. Decorate Python functions with `@tool` (docstring → description, signature → schema)
+2. Call `llm.bind_tools(tools)` to attach schemas to the model
+3. LLM returns an `AIMessage` with `.tool_calls` populated (non-empty = wants to call a tool)
+4. `ToolNode` executes all tool calls and returns `ToolMessages`
+5. LLM receives the results and continues reasoning
 
 ## 2.2 Memory Types
 
 ```
-short_term.py  → context window manager (rolling + summarization)
+short_term.py  → MemorySaver checkpointer + thread_id (rolling/summarization concepts)
 long_term.py   → ChromaDB vector persistence
 episodic.py    → JSON log of past runs, queryable
 semantic.py    → key-value fact store with TTL
@@ -48,17 +49,19 @@ human_in_loop.py     → approval gates and feedback injection
 All modern agent frameworks (LangChain, LangGraph, AutoGen) are variations
 on the ReAct loop. Understand this and you understand the rest.
 
-### ReAct Loop Anatomy:
+### ReAct Loop Anatomy (as LangGraph StateGraph):
 ```
-User Query
+User Query → AgentState["messages"]
     ↓
-[Claude thinks] → Thought: "I need to look up X"
+call_model node   → LLM produces AIMessage (with or without tool_calls)
     ↓
-[Claude acts]   → tool_use: web_search(query="X")
+should_continue   → if tool_calls: → "tools" node; else: → END
     ↓
-[Your code]     → execute tool, get result
+ToolNode          → executes tool calls, returns ToolMessages
     ↓
-[Claude observes] → "The result says Y, now I can answer"
+(edge back to call_model — loop continues)
     ↓
-[Claude responds] → Final answer (stop_reason = "end_turn")
+END               → state["messages"][-1].content = final answer
 ```
+
+One-liner shorthand: `agent = create_react_agent(get_llm(), tools=[...])`

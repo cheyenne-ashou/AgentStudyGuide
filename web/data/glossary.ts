@@ -125,8 +125,44 @@ export const glossary: Record<string, GlossaryEntry> = {
     example: 'A LangChain RAG chain: load docs → split → embed → store → retriever → LLM → answer.',
   },
   langgraph: {
-    short: 'A framework (built on LangChain) for building agent workflows as explicit state machine graphs. Better for loops and conditional logic than chains.',
-    example: 'Define nodes (plan, execute, validate) and edges (if score < 0.7, go back to execute). The graph runs step by step.',
+    short: 'A framework (built on LangChain) for building stateful, graph-based AI agent workflows. Each node is a Python function; edges define transitions. StateGraph is its core class.',
+    example: 'workflow = StateGraph(AgentState); workflow.add_node("agent", call_model); workflow.add_node("tools", ToolNode(tools)); workflow.add_conditional_edges("agent", should_continue).',
+  },
+  stategraph: {
+    short: "LangGraph's core class. A directed graph where each node is a function that reads/updates shared TypedDict state. Conditional edges route between nodes based on state.",
+    example: 'workflow = StateGraph(AgentState) → add_node, add_conditional_edges, compile() → agent = workflow.compile()',
+  },
+  runnable: {
+    short: "LangChain's universal interface. Any object with .invoke(), .stream(), and .batch() methods. LLMs, prompts, parsers, retrievers, and chains are all Runnables.",
+    example: 'chain = prompt | llm | parser — each | composes two Runnables. chain.invoke({"task": "..."}) runs the whole pipeline.',
+  },
+  lcel: {
+    short: 'LangChain Expression Language. The | operator chains Runnable objects into a pipeline. Composable, type-safe, and supports streaming.',
+    example: 'chain = ChatPromptTemplate.from_messages([...]) | ChatAnthropic(model=...) | StrOutputParser()',
+  },
+  checkpointer: {
+    short: 'A LangGraph component that persists graph state after each node execution. Enables pause-and-resume (human-in-the-loop) and crash recovery. Keyed by thread_id.',
+    example: 'agent = workflow.compile(checkpointer=MemorySaver()). Each call with config={"configurable": {"thread_id": "session-1"}} resumes from the last checkpoint.',
+  },
+  memorysaver: {
+    short: "LangGraph's in-memory checkpointer. Stores full graph state (including message history) keyed by thread_id. Use SqliteSaver or RedisSaver for production.",
+    example: 'memory = MemorySaver(); agent = create_react_agent(llm, tools, checkpointer=memory). Invoke twice with the same thread_id to continue the conversation.',
+  },
+  toolnode: {
+    short: 'A pre-built LangGraph node that reads tool_calls from the last AIMessage, executes each tool, and returns ToolMessages. Replaces manual tool dispatch loops.',
+    example: 'tool_node = ToolNode([calculator, web_search]). Add it as a node: workflow.add_node("tools", tool_node).',
+  },
+  'bind_tools': {
+    short: 'A ChatModel method that attaches tool schemas so the model knows which tools are available. Returns a new Runnable with tools bound.',
+    example: 'llm_with_tools = ChatAnthropic(model=...).bind_tools([calculator, web_search]). The LLM will now generate tool_calls in its response when appropriate.',
+  },
+  interrupt: {
+    short: 'LangGraph function that pauses graph execution at a node and surfaces data to the caller. The caller resumes with Command(resume=<value>).',
+    example: 'human_response = interrupt({"question": "Approve?", "details": action}). Resume: agent.invoke(Command(resume="approved"), config).',
+  },
+  command: {
+    short: 'LangGraph return type for dynamic routing. Command(goto="node_name") routes to a specific node. Command(resume=...) resumes an interrupted graph.',
+    example: 'def supervisor_node(state) -> Command: return Command(goto="researcher", update={"messages": [...]})',
   },
 
   // ── Infrastructure & scaling ────────────────────────────────────────────────

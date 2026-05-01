@@ -1,10 +1,38 @@
 """
-Shared Pydantic models used across study modules.
+Shared Pydantic models and LangGraph TypedDict state schemas.
 """
+import operator
 from pydantic import BaseModel, Field
-from typing import Any
+from typing import Any, Annotated, TypedDict
 from datetime import datetime
+from langgraph.graph.message import add_messages
 
+
+# ── LangGraph State Schemas ───────────────────────────────────────────────────
+
+class AgentState(TypedDict):
+    """Base state for all ReAct agents. The add_messages reducer appends
+    new messages rather than overwriting, enabling incremental history."""
+    messages: Annotated[list, add_messages]
+
+
+class PlanExecuteState(TypedDict):
+    """State for plan-and-execute agents: tracks the plan, accumulated
+    step results, and the final response once execution completes."""
+    messages: Annotated[list, add_messages]
+    plan: list[str]
+    past_steps: Annotated[list, operator.add]
+    response: str | None
+
+
+class SupervisorState(TypedDict):
+    """State for supervisor/multi-agent graphs. next_agent is written by
+    the supervisor node and read by the router edge."""
+    messages: Annotated[list, add_messages]
+    next_agent: str
+
+
+# ── Pydantic Models (logging, eval, tool tracking) ───────────────────────────
 
 class ToolCall(BaseModel):
     name: str

@@ -1,8 +1,14 @@
 """
-Human-in-the-Loop Pattern
-Demonstrates two human oversight mechanisms:
-  1. Approval gate — agent pauses and asks human before taking a risky action
-  2. Feedback injection — human reviews draft output and agent incorporates changes
+Human-in-the-Loop Pattern (LangGraph)
+Demonstrates LangGraph's native interrupt() + Command(resume=...) API.
+
+interrupt() pauses graph execution and surfaces data to the caller.
+The caller resumes by passing Command(resume=<human_response>).
+
+This replaces the old pattern of embedding approval logic inside the
+agent's while loop. With LangGraph, the graph pauses at a node boundary
+and can be resumed after any amount of time (e.g., the user responds
+hours later — state is preserved in the checkpointer).
 
 When to require human approval:
   - Irreversible actions (delete, send email, deploy)
@@ -18,147 +24,165 @@ from pathlib import Path
 _root = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").exists())
 sys.path.insert(0, str(_root))
 
-from core.client import get_client, MODEL, cached_system
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt, Command
+from core.client import get_llm
+from core.models import AgentState
 
 
-def simulate_human_input(prompt: str, auto_response: str = "") -> str:
-    """In real usage this would be input(). Here we auto-respond for demo."""
-    print(f"\n  [HUMAN PROMPT]: {prompt}")
-    if auto_response:
-        print(f"  [AUTO-RESPONSE]: {auto_response}")
-        return auto_response
-    return input("  > ")
+# ── Part 1: Approval Gate ─────────────────────────────────────────────────────
+
+RISKY_ACTIONS = {"send_email", "delete_file", "deploy", "payment"}
+
+llm = get_llm()
 
 
-class HumanInLoopAgent:
+def draft_action_node(state: AgentState) -> dict:
+    """Generate a draft action for the task."""
+    task = state["messages"][-1].content
+    response = llm.invoke([
+        SystemMessage(content="You are a helpful agent. Describe the action you will take to complete the task."),
+        HumanMessage(content=task),
+    ])
+    return {"messages": [response]}
+
+
+def approval_gate_node(state: AgentState) -> dict:
     """
-    Agent that pauses for human approval on risky actions and
-    incorporates human feedback on draft outputs.
+    Pause execution and wait for human approval.
+    interrupt() surfaces the action details to the caller.
+    The graph resumes when Command(resume=...) is passed.
     """
+    last_message = state["messages"][-1].content
+    print(f"\n  [APPROVAL REQUIRED]")
+    print(f"  Proposed action: {last_message[:200]}")
 
-    RISKY_ACTIONS = {"send_email", "delete_file", "execute_code", "deploy", "payment"}
+    # interrupt() pauses the graph here and returns data to the caller
+    human_response = interrupt({
+        "question": "Approve this action?",
+        "proposed_action": last_message,
+    })
 
-    def __init__(self, auto_approve: bool = False, auto_feedback: str = ""):
-        self.client = get_client()
-        self.auto_approve = auto_approve
-        self.auto_feedback = auto_feedback
-        self.approved_count = 0
-        self.rejected_count = 0
+    if human_response == "approved":
+        return {"messages": [AIMessage(content="Action approved and executed.")]}
+    else:
+        return {"messages": [AIMessage(content=f"Action rejected. Reason: {human_response}")]}
 
-    def _request_approval(self, action: str, details: str) -> bool:
-        """Ask human for approval before executing a risky action."""
-        print(f"\n  ⚠️  APPROVAL REQUIRED")
-        print(f"  Action: {action}")
-        print(f"  Details: {details}")
 
-        if self.auto_approve:
-            print(f"  [AUTO-APPROVED for demo]")
-            self.approved_count += 1
-            return True
+def build_approval_graph():
+    workflow = StateGraph(AgentState)
+    workflow.add_node("draft", draft_action_node)
+    workflow.add_node("approval_gate", approval_gate_node)
+    workflow.set_entry_point("draft")
+    workflow.add_edge("draft", "approval_gate")
+    workflow.add_edge("approval_gate", END)
+    # MemorySaver is required for interrupt() to work — it preserves state
+    return workflow.compile(checkpointer=MemorySaver())
 
-        response = simulate_human_input("Approve? (y/n)", "y")
-        approved = response.lower().strip() in ("y", "yes", "1", "")
-        if approved:
-            self.approved_count += 1
-            print("  ✓ Approved")
-        else:
-            self.rejected_count += 1
-            print("  ✗ Rejected")
-        return approved
 
-    def _get_feedback(self, draft: str) -> str:
-        """Ask human to review a draft and return feedback."""
-        print(f"\n  📝 DRAFT FOR REVIEW:")
-        print(f"  {draft[:300]}")
+def demo_approval_gate() -> None:
+    """Run the approval gate demo with simulated human responses."""
+    print("\n=== Part 1: Approval Gate ===")
+    agent = build_approval_graph()
+    config = {"configurable": {"thread_id": "approval-demo"}}
 
-        if self.auto_feedback:
-            print(f"  [AUTO-FEEDBACK]: {self.auto_feedback}")
-            return self.auto_feedback
+    task = "Summarize this week's engineering work and send an update email to the team."
+    print(f"Task: {task}")
 
-        feedback = simulate_human_input(
-            "Any changes needed? (press Enter to approve as-is)",
-            ""
-        )
-        return feedback.strip()
+    # First invocation: graph runs until interrupt()
+    result = agent.invoke({"messages": [HumanMessage(content=task)]}, config)
 
-    def execute_task_with_approval(self, task: str) -> str:
-        """Run task, pausing for approval on risky actions."""
-        print(f"\nTask: {task}")
-        print("─" * 50)
+    # In real usage, the user sees the interrupt data and responds.
+    # Here we simulate an immediate approval with Command(resume=...).
+    print("\n  [Simulating human approval...]")
+    resumed = agent.invoke(Command(resume="approved"), config)
+    print(f"\n  Result: {resumed['messages'][-1].content}")
 
-        # Simulate agent deciding it needs to send an email
-        risky_action = "send_email"
-        email_draft = (
-            "To: team@company.com\n"
-            "Subject: Weekly Status Update\n"
-            "Body: This week we completed the RAG implementation and started testing."
-        )
 
-        approved = self._request_approval(risky_action, email_draft)
-        if not approved:
-            return "Task aborted — user rejected the email action."
+# ── Part 2: Feedback Loop ─────────────────────────────────────────────────────
 
-        print("\n  [Executing approved action: send_email]")
-        return "Email sent successfully. Task complete."
+def draft_writer_node(state: AgentState) -> dict:
+    """Generate a draft response."""
+    messages = state["messages"]
+    response = llm.invoke([
+        SystemMessage(content="You are a helpful writing assistant. Produce clear, concise output."),
+    ] + messages)
+    return {"messages": [response]}
 
-    def execute_with_feedback_loop(self, task: str, max_revisions: int = 3) -> str:
-        """Generate output, get human feedback, revise until approved."""
-        print(f"\nTask: {task}")
-        print("─" * 50)
 
-        messages = [{"role": "user", "content": task}]
-        system = cached_system(
-            "You are a helpful writing assistant. Produce clear, concise output."
-        )
+def feedback_review_node(state: AgentState) -> dict:
+    """
+    Show the draft to the human and collect feedback.
+    If feedback is empty, the draft is approved.
+    If feedback is provided, it's injected as a user message so the writer revises.
+    """
+    draft = state["messages"][-1].content
+    print(f"\n  [DRAFT FOR REVIEW]:\n  {draft[:300]}")
 
-        for revision in range(1, max_revisions + 1):
-            print(f"\n  [Revision {revision}] Generating...")
-            response = self.client.messages.create(
-                model=MODEL,
-                max_tokens=512,
-                system=system,
-                messages=messages,
-            )
-            draft = response.content[0].text.strip()
+    human_feedback = interrupt({
+        "question": "Any changes needed? (empty = approve as-is)",
+        "draft": draft,
+    })
 
-            feedback = self._get_feedback(draft)
+    if not human_feedback:
+        return {"messages": [AIMessage(content="[APPROVED] " + draft)]}
+    else:
+        # Inject feedback as a new user message — the writer node will revise
+        return {"messages": [HumanMessage(content=f"Please revise: {human_feedback}")]}
 
-            if not feedback:
-                print("  ✓ Human approved the output.")
-                return draft
 
-            print(f"\n  [Incorporating feedback: '{feedback[:60]}']")
-            messages.append({"role": "assistant", "content": draft})
-            messages.append({
-                "role": "user",
-                "content": f"Please revise based on this feedback: {feedback}"
-            })
+def route_after_review(state: AgentState) -> str:
+    """If the last message is a revision request, go back to the writer."""
+    last = state["messages"][-1]
+    if isinstance(last, HumanMessage):
+        return "writer"  # needs revision
+    return END  # approved
 
-        print("  ⚠️  Max revisions reached. Returning last draft.")
-        return draft
+
+def build_feedback_graph():
+    workflow = StateGraph(AgentState)
+    workflow.add_node("writer", draft_writer_node)
+    workflow.add_node("review", feedback_review_node)
+    workflow.set_entry_point("writer")
+    workflow.add_edge("writer", "review")
+    workflow.add_conditional_edges("review", route_after_review)
+    return workflow.compile(checkpointer=MemorySaver())
+
+
+def demo_feedback_loop() -> None:
+    """Run the feedback loop with simulated human feedback."""
+    print("\n\n=== Part 2: Feedback Loop ===")
+    agent = build_feedback_graph()
+    config = {"configurable": {"thread_id": "feedback-demo"}}
+
+    task = "Write a brief summary of what RAG (Retrieval-Augmented Generation) is."
+    print(f"Task: {task}")
+
+    # First invocation — graph runs until review interrupt()
+    agent.invoke({"messages": [HumanMessage(content=task)]}, config)
+
+    # Simulate human feedback requesting a revision
+    print("\n  [Simulating feedback: 'Make it more concise and add bullet points']")
+    agent.invoke(Command(resume="Make it more concise and add bullet points."), config)
+
+    # Approve the revision
+    print("\n  [Simulating approval: empty string = approve]")
+    final = agent.invoke(Command(resume=""), config)
+    print(f"\n  Final output:\n{final['messages'][-1].content}")
 
 
 if __name__ == "__main__":
-    print("=== HUMAN-IN-THE-LOOP DEMO ===")
+    print("=== HUMAN-IN-THE-LOOP DEMO (LangGraph) ===")
 
-    # ── Part 1: Approval Gate ─────────────────────────────────────────────────
-    print("\n=== Part 1: Approval Gate (auto-approve for demo) ===")
-    agent = HumanInLoopAgent(auto_approve=True)
-    result = agent.execute_task_with_approval(
-        "Summarize this week's engineering work and send an update email to the team."
-    )
-    print(f"\nResult: {result}")
-    print(f"Approved: {agent.approved_count}, Rejected: {agent.rejected_count}")
+    demo_approval_gate()
+    demo_feedback_loop()
 
-    # ── Part 2: Feedback Loop ─────────────────────────────────────────────────
-    print("\n\n=== Part 2: Feedback Loop (auto-feedback for demo) ===")
-    agent2 = HumanInLoopAgent(
-        auto_feedback="Make it more concise and add bullet points."
-    )
-    final = agent2.execute_with_feedback_loop(
-        "Write a brief summary of what RAG (Retrieval-Augmented Generation) is."
-    )
-    print(f"\nFinal Output:\n{final}")
+    print("\n--- LangGraph interrupt() vs old pattern ---")
+    print("  Old: while loop with input() blocking; state not preserved across process restarts")
+    print("  New: interrupt() pauses the graph; state survives in MemorySaver/DB")
+    print("       human can respond hours later; resume with Command(resume=...)")
 
     print("\n--- When to use Human-in-the-Loop ---")
     approval_triggers = [
@@ -170,7 +194,3 @@ if __name__ == "__main__":
     ]
     for trigger, example in approval_triggers:
         print(f"  {trigger:<25} → {example}")
-
-    print("\n--- Tradeoffs ---")
-    print("  Human-in-loop improves safety but adds latency and reduces autonomy.")
-    print("  Good systems progressively reduce approval requirements as agent builds trust.")
